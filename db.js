@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS ledger (
 try { db.exec("ALTER TABLE cards ADD COLUMN image_url TEXT"); } catch {}
 /* offers feature migrations */
 try { db.exec("ALTER TABLE binder ADD COLUMN for_trade INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE binder ADD COLUMN qty INTEGER DEFAULT 1"); } catch {}
 try { db.exec("ALTER TABLE trades ADD COLUMN settlement TEXT DEFAULT 'market'"); } catch {}
 try { db.exec("ALTER TABLE trades ADD COLUMN agreed_credit_cents INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE trades ADD COLUMN payer_id INTEGER"); } catch {}
@@ -82,6 +83,7 @@ try { db.exec("ALTER TABLE trades ADD COLUMN payee_id INTEGER"); } catch {}
 /* proposal & shipping lifecycle migrations */
 try { db.exec("ALTER TABLE trades ADD COLUMN proposed_by INTEGER"); } catch {}
 try { db.exec("ALTER TABLE trade_legs ADD COLUMN shipped INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE binder ADD COLUMN qty INTEGER DEFAULT 1"); } catch {}
 db.exec(`CREATE TABLE IF NOT EXISTS trade_approvals (
   trade_id INTEGER NOT NULL REFERENCES trades(id),
   user_id INTEGER NOT NULL REFERENCES users(id),

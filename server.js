@@ -128,20 +128,24 @@ app.get("/api/search", auth, async (req, res) => {
 
 /* ----------------------------- binder ----------------------------- */
 app.get("/api/binder", auth, (req, res) => {
-  const rows = db.prepare("SELECT b.side, b.for_trade, c.* FROM binder b JOIN cards c ON c.id=b.card_id WHERE b.user_id=?").all(req.session.uid);
+  const rows = db.prepare("SELECT b.side, b.for_trade, b.qty, c.* FROM binder b JOIN cards c ON c.id=b.card_id WHERE b.user_id=?").all(req.session.uid);
   res.json({ have: rows.filter((r) => r.side === "have"), want: rows.filter((r) => r.side === "want") });
 });
 
 app.post("/api/binder", auth, (req, res) => {
-  const { cardId, side } = req.body || {};
+  const { cardId, side, op = "inc" } = req.body || {};
   if (!["have", "want"].includes(side)) return res.status(400).json({ error: "side must be have|want" });
   if (!db.prepare("SELECT 1 FROM cards WHERE id=?").get(cardId)) return res.status(404).json({ error: "Unknown card" });
-  /* A card may sit in BOTH lists: players seek extra copies (playsets),
-     condition upgrades, and trade stock of cards they already own. */
-  const existing = db.prepare("SELECT id FROM binder WHERE user_id=? AND card_id=? AND side=?").get(req.session.uid, cardId, side);
-  if (existing) db.prepare("DELETE FROM binder WHERE id=?").run(existing.id);
-  else db.prepare("INSERT INTO binder (user_id,card_id,side) VALUES (?,?,?)").run(req.session.uid, cardId, side);
-  res.json({ ok: true, toggled: existing ? "removed" : "added" });
+  const row = db.prepare("SELECT id, qty FROM binder WHERE user_id=? AND card_id=? AND side=?").get(req.session.uid, cardId, side);
+  if (op === "inc") {
+    if (row) { db.prepare("UPDATE binder SET qty=qty+1 WHERE id=?").run(row.id); return res.json({ ok: true, qty: row.qty + 1 }); }
+    db.prepare("INSERT INTO binder (user_id,card_id,side,qty) VALUES (?,?,?,1)").run(req.session.uid, cardId, side);
+    return res.json({ ok: true, qty: 1 });
+  }
+  if (!row) return res.status(404).json({ error: "Not in your list" });
+  if (op === "dec" && row.qty > 1) { db.prepare("UPDATE binder SET qty=qty-1 WHERE id=?").run(row.id); return res.json({ ok: true, qty: row.qty - 1 }); }
+  db.prepare("DELETE FROM binder WHERE id=?").run(row.id); // dec at 1, or remove
+  res.json({ ok: true, qty: 0 });
 });
 
 app.post("/api/binder/fortrade", auth, (req, res) => {
@@ -155,8 +159,8 @@ app.post("/api/binder/fortrade", auth, (req, res) => {
 app.get("/api/board", auth, (req, res) => {
   const cards = db.prepare(`
     SELECT c.*, 
-      (SELECT GROUP_CONCAT(u.name) FROM binder b JOIN users u ON u.id=b.user_id WHERE b.card_id=c.id AND b.side='have') asks,
-      (SELECT GROUP_CONCAT(u.name) FROM binder b JOIN users u ON u.id=b.user_id WHERE b.card_id=c.id AND b.side='want') bids
+      (SELECT GROUP_CONCAT(u.name || CASE WHEN b.qty>1 THEN ' ×'||b.qty ELSE '' END, ', ') FROM binder b JOIN users u ON u.id=b.user_id WHERE b.card_id=c.id AND b.side='have') asks,
+      (SELECT GROUP_CONCAT(u.name || CASE WHEN b.qty>1 THEN ' ×'||b.qty ELSE '' END, ', ') FROM binder b JOIN users u ON u.id=b.user_id WHERE b.card_id=c.id AND b.side='want') bids
     FROM cards c
     WHERE EXISTS (SELECT 1 FROM binder b WHERE b.card_id=c.id)
     ORDER BY c.changes_30d DESC`).all();
@@ -173,38 +177,49 @@ app.get("/api/board", auth, (req, res) => {
 
 /* --------------------------- matching ----------------------------- */
 function findRoutes() {
-  /* cards already committed to a proposed/locked trade are off the table */
-  const busy = new Set(db.prepare(`SELECT l.from_user||':'||l.card_id k FROM trade_legs l
-    JOIN trades t ON t.id=l.trade_id WHERE t.status IN ('proposed','locked')`).all().map(r=>r.k));
+  /* availability = binder qty minus copies already committed to proposed/locked trades */
+  const committed = {};
+  db.prepare(`SELECT l.from_user uid, l.card_id cid, COUNT(*) n FROM trade_legs l
+    JOIN trades t ON t.id=l.trade_id WHERE t.status IN ('proposed','locked')
+    GROUP BY l.from_user, l.card_id`).all().forEach((r) => { committed[r.uid + ":" + r.cid] = r.n; });
+
   const users = db.prepare("SELECT id,name,want_mode FROM users").all();
-  const binderRows = db.prepare("SELECT user_id,card_id,side FROM binder").all();
+  const binderRows = db.prepare("SELECT user_id,card_id,side,qty FROM binder").all();
   const cards = Object.fromEntries(db.prepare("SELECT * FROM cards").all().map((c) => [c.id, c]));
+
+  const availGive = {}; // 'uid:card' -> copies free to trade
+  const wantQty = {};   // 'uid:card' -> copies still sought
+  binderRows.forEach((b) => {
+    const k = b.user_id + ":" + b.card_id;
+    if (b.side === "have") availGive[k] = Math.max(0, (b.qty || 1) - (committed[k] || 0));
+    else wantQty[k] = b.qty || 1;
+  });
+
   const traders = users.map((u) => ({
     ...u,
-    have: binderRows.filter((b) => b.user_id === u.id && b.side === "have").map((b) => b.card_id),
-    want: binderRows.filter((b) => b.user_id === u.id && b.side === "want").map((b) => b.card_id),
+    have: binderRows.filter((b) => b.user_id === u.id && b.side === "have" && availGive[u.id + ":" + b.card_id] > 0).map((b) => b.card_id),
   }));
   const wants = (t, cardId) =>
-    t.want_mode === "velocity" ? isFast(cards[cardId]) && !t.have.includes(cardId) : t.want.includes(cardId);
+    t.want_mode === "velocity" ? isFast(cards[cardId]) && !(availGive[t.id + ":" + cardId] > 0) : (wantQty[t.id + ":" + cardId] || 0) > 0;
 
   const edges = {};
   traders.forEach((a) => {
     edges[a.id] = [];
     traders.forEach((b) => {
       if (a.id === b.id) return;
-      a.have.forEach((cardId) => { if (!busy.has(a.id + ":" + cardId) && wants(b, cardId)) edges[a.id].push({ to: b.id, card: cardId }); });
+      a.have.forEach((cardId) => { if (wants(b, cardId)) edges[a.id].push({ to: b.id, card: cardId }); });
     });
   });
 
   const routes = [], seen = new Set(), ids = traders.map((t) => t.id);
-  const MAX_CYCLES = 400; // enumeration cap; selection picks the best subset
+  const MAX_CYCLES = 400;
   const dfs = (start, cur, path, usedU, usedC) => {
     if (routes.length >= MAX_CYCLES) return;
     for (const e of edges[cur] || []) {
       if (usedC.has(e.card)) continue;
       if (e.to === start && path.length >= 1) {
         const route = [...path, { from: cur, to: e.to, card: e.card }];
-        const key = route.map((s) => `${s.from}>${s.card}>${s.to}`).sort().join("|");
+        const key = route.map((st) => `${st.from}>${st.card}>${st.to}`).sort().join("|");
         if (!seen.has(key)) { seen.add(key); routes.push(route); }
         continue;
       }
@@ -217,41 +232,44 @@ function findRoutes() {
   };
   ids.forEach((id) => dfs(id, id, [], new Set([id]), new Set()));
 
-  /* ---- multilateral clearing: score every cycle, then select the ----
-     ---- best NON-CONFLICTING set (no two routes claim the same     ----
-     ---- physical card from the same owner, or deliver the same     ----
-     ---- card twice to the same seeker)                             ---- */
+  /* clearing: score cycles, then select respecting per-copy capacity */
   const nameOf = Object.fromEntries(traders.map((t) => [t.id, t.name]));
   const enrich = (route) => {
     const settle = {};
     let totalValue = 0;
-    route.forEach((s) => {
-      const v = cards[s.card]?.price_cents ?? 0;
+    route.forEach((st) => {
+      const v = cards[st.card]?.price_cents ?? 0;
       totalValue += v;
-      settle[s.from] = (settle[s.from] || 0) - v;
-      settle[s.to] = (settle[s.to] || 0) + v;
+      settle[st.from] = (settle[st.from] || 0) - v;
+      settle[st.to] = (settle[st.to] || 0) + v;
     });
     const creditMoved = Object.values(settle).reduce((a, c) => a + Math.abs(c), 0) / 2;
-    /* score: more value traded is better; each extra hop costs $15 of
-       score (more parties = more shipping risk); heavy credit imbalance
-       costs half its size (lopsided trades are fragile) */
     const score = totalValue - 1500 * (route.length - 2) - Math.round(creditMoved / 2);
     return { route, totalValue, creditMoved, score, settle };
   };
 
   const scored = routes.map(enrich).sort((a, b) => b.score - a.score);
-  const used = new Set();
+  const giveUsed = {}, getUsed = {};
   const selected = [];
   for (const r of scored) {
-    const keys = r.route.flatMap((s) => [`give:${s.from}:${s.card}`, `get:${s.to}:${s.card}`]);
-    if (keys.some((k) => used.has(k))) continue;
-    keys.forEach((k) => used.add(k));
+    const ok = r.route.every((st) => {
+      const gk = st.from + ":" + st.card, rk = st.to + ":" + st.card;
+      const giveCap = availGive[gk] || 0;
+      const trader = traders.find((t) => t.id === st.to);
+      const getCap = trader?.want_mode === "velocity" ? Infinity : (wantQty[rk] || 0);
+      return (giveUsed[gk] || 0) < giveCap && (getUsed[rk] || 0) < getCap;
+    });
+    if (!ok) continue;
+    r.route.forEach((st) => {
+      giveUsed[st.from + ":" + st.card] = (giveUsed[st.from + ":" + st.card] || 0) + 1;
+      getUsed[st.to + ":" + st.card] = (getUsed[st.to + ":" + st.card] || 0) + 1;
+    });
     selected.push(r);
     if (selected.length >= 12) break;
   }
 
   return selected.map(({ route, totalValue, creditMoved, score, settle }) => ({
-    legs: route.map((s) => ({ ...s, fromName: nameOf[s.from], toName: nameOf[s.to], card: cards[s.card] })),
+    legs: route.map((st) => ({ ...st, fromName: nameOf[st.from], toName: nameOf[st.to], card: cards[st.card] })),
     settlement: Object.entries(settle).map(([uid, cents]) => ({ userId: +uid, name: nameOf[uid], cents })),
     score, total_value_cents: totalValue, credit_moved_cents: creditMoved,
   }));
@@ -270,9 +288,16 @@ app.post("/api/trades/propose", auth, (req, res) => {
   const tid = Number(t.lastInsertRowid);
   const ins = db.prepare("INSERT INTO trade_legs (trade_id,from_user,to_user,card_id,value_cents) VALUES (?,?,?,?,?)");
   const participants = new Set();
+  const needed = {};
   for (const l of legs) {
     const card = db.prepare("SELECT * FROM cards WHERE id=?").get(l.card?.id || l.card);
     if (!card) return res.status(400).json({ error: "Unknown card in route" });
+    const key = l.from + ":" + card.id;
+    needed[key] = (needed[key] || 0) + 1;
+    const own = db.prepare("SELECT qty FROM binder WHERE user_id=? AND card_id=? AND side='have'").get(l.from, card.id)?.qty || 0;
+    const already = db.prepare(`SELECT COUNT(*) n FROM trade_legs tl JOIN trades tt ON tt.id=tl.trade_id
+      WHERE tl.from_user=? AND tl.card_id=? AND tt.status IN ('proposed','locked')`).get(l.from, card.id).n;
+    if (own - already - needed[key] < 0) return res.status(400).json({ error: "A shipper doesn't have enough available copies of " + card.name });
     ins.run(tid, l.from, l.to, card.id, card.price_cents);
     participants.add(l.from); participants.add(l.to);
   }
@@ -447,11 +472,25 @@ app.post("/api/admin/trades/:id/release", auth, admin, (req, res) => {
     for (const [uid, cents] of Object.entries(settle)) if (cents !== 0) ins.run(+uid, cents, "settlement", trade.id);
   }
 
-  // move cards: remove from shipper's have + receiver's want; add to receiver's have
+  /* move one copy per leg (authored & test-verified):
+     shipper have -1 (row deleted at 0); receiver want -1 (deleted at 0,
+     they can re-seek more); receiver have +1 (row created if absent) */
+  const getRow = db.prepare("SELECT id, qty FROM binder WHERE user_id=? AND card_id=? AND side=?");
+  const setQty = db.prepare("UPDATE binder SET qty=? WHERE id=?");
+  const delRow = db.prepare("DELETE FROM binder WHERE id=?");
+  const newHave = db.prepare("INSERT INTO binder (user_id,card_id,side,qty) VALUES (?,?,'have',1)");
+  const minusOne = (uid, cid, side) => {
+    const r = getRow.get(uid, cid, side);
+    if (!r) return;
+    if (r.qty > 1) setQty.run(r.qty - 1, r.id);
+    else delRow.run(r.id);
+  };
   for (const l of legs) {
-    db.prepare("DELETE FROM binder WHERE user_id=? AND card_id=? AND side='have'").run(l.from_user, l.card_id);
-    db.prepare("DELETE FROM binder WHERE user_id=? AND card_id=? AND side='want'").run(l.to_user, l.card_id);
-    db.prepare("INSERT OR IGNORE INTO binder (user_id,card_id,side) VALUES (?,?,'have')").run(l.to_user, l.card_id);
+    minusOne(l.from_user, l.card_id, "have");
+    minusOne(l.to_user, l.card_id, "want");
+    const h = getRow.get(l.to_user, l.card_id, "have");
+    if (h) setQty.run(h.qty + 1, h.id);
+    else newHave.run(l.to_user, l.card_id);
   }
   db.prepare("UPDATE trades SET status='closed' WHERE id=?").run(trade.id);
   res.json({ ok: true, status: "closed" });

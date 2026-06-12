@@ -448,21 +448,30 @@ async function doSearch(side){
       </div>`).join('')||'<p class="muted small" style="padding:6px 0">No results.</p>';
   }catch(e){$(note).textContent=e.message}
 }
-async function addCard(id,side){try{const j=await api('/api/binder',{method:'POST',body:{cardId:id,side}});toast((side==='have'?'binder ':'seeking ')+j.toggled);loadBinder();}catch(e){toast(e.message)}}
+async function addCard(id,side){try{const j=await api('/api/binder',{method:'POST',body:{cardId:id,side,op:'inc'}});
+  toast(j.qty>1?('Now ×'+j.qty+' in your '+(side==='have'?'binder':'seek list')):('Added to your '+(side==='have'?'binder':'seek list')));loadBinder();}catch(e){toast(e.message)}}
+async function decCard(id,side){try{await api('/api/binder',{method:'POST',body:{cardId:id,side,op:'dec'}});loadBinder();}catch(e){toast(e.message)}}
+async function removeCard(id,side){try{await api('/api/binder',{method:'POST',body:{cardId:id,side,op:'remove'}});loadBinder();}catch(e){toast(e.message)}}
 async function loadBinder(){
   const j=await api('/api/binder');
   const grid=(list,side)=>list.map(c=>`
     <div class="gcard">
       ${c.image_url?`<img src="${esc(c.image_url)}" loading="lazy" onerror="this.outerHTML='<div class=ph2>✦</div>'">`:'<div class="ph2">✦</div>'}
-      <div class="nm">${esc(c.name)}</div><div class="pr">${fmt(c.price_cents)}</div>
+      <div class="nm">${esc(c.name)}</div><div class="pr">${fmt(c.price_cents)}${(c.qty||1)>1?' each':''}</div>
+      <div class="row" style="justify-content:center;gap:6px;margin-top:5px">
+        <button class="ghost" style="padding:2px 9px" onclick="decCard('${c.id}','${side}')">−</button>
+        <b style="font-size:13px">×${c.qty||1}</b>
+        <button class="ghost" style="padding:2px 9px" onclick="addCard('${c.id}','${side}')">+</button>
+      </div>
       ${side==='have'?`<button class="checkbtn full ${c.for_trade?'waxb':'ghost'}" style="margin-top:6px" onclick="toggleForTrade('${c.id}')">${c.for_trade?'✓ for trade':'mark for trade'}</button>`:''}
-      <span class="x" title="remove" onclick="addCard('${c.id}','${side}')" style="cursor:pointer">✕</span>
+      <span class="x" title="remove all copies" onclick="removeCard('${c.id}','${side}')" style="cursor:pointer">✕</span>
     </div>`).join('');
   $('haveGrid').innerHTML=grid(j.have,'have');
   $('haveEmpty').classList.toggle('hidden',j.have.length>0);
-  const total=j.have.reduce((s,c)=>s+c.price_cents,0);
+  const copies=j.have.reduce((s,c)=>s+(c.qty||1),0);
+  const total=j.have.reduce((s,c)=>s+c.price_cents*(c.qty||1),0);
   const listed=j.have.filter(c=>c.for_trade).length;
-  $('binderStats').textContent=j.have.length?`${j.have.length} card${j.have.length>1?'s':''} · ${fmt(total)} · ${listed} for trade`:'';
+  $('binderStats').textContent=j.have.length?`${copies} card${copies>1?'s':''} · ${fmt(total)} · ${listed} for trade`:'';
   $('wantGrid').innerHTML=grid(j.want,'want');
   $('wantEmpty').classList.toggle('hidden',j.want.length>0);
 }
