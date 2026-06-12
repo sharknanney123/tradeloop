@@ -128,9 +128,8 @@ app.post("/api/binder", auth, (req, res) => {
   const { cardId, side } = req.body || {};
   if (!["have", "want"].includes(side)) return res.status(400).json({ error: "side must be have|want" });
   if (!db.prepare("SELECT 1 FROM cards WHERE id=?").get(cardId)) return res.status(404).json({ error: "Unknown card" });
-  const other = side === "have" ? "want" : "have";
-  if (db.prepare("SELECT 1 FROM binder WHERE user_id=? AND card_id=? AND side=?").get(req.session.uid, cardId, other))
-    return res.status(400).json({ error: `Already in your ${other} list` });
+  /* A card may sit in BOTH lists: players seek extra copies (playsets),
+     condition upgrades, and trade stock of cards they already own. */
   const existing = db.prepare("SELECT id FROM binder WHERE user_id=? AND card_id=? AND side=?").get(req.session.uid, cardId, side);
   if (existing) db.prepare("DELETE FROM binder WHERE id=?").run(existing.id);
   else db.prepare("INSERT INTO binder (user_id,card_id,side) VALUES (?,?,?)").run(req.session.uid, cardId, side);
