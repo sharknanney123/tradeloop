@@ -107,7 +107,15 @@ app.get("/api/search", auth, async (req, res) => {
     for (const c of json.data || []) {
       const v = c.variants?.[0];
       if (!v?.price) continue;
-      const img = c.tcgplayerId ? `https://product-images.tcgplayer.com/fit-in/437x437/${c.tcgplayerId}.jpg` : null;
+      /* image priority:
+         1. Scryfall CDN via scryfallId (MTG — best quality, hotlink-friendly)
+         2. Scryfall fuzzy-name lookup for MTG cards missing the id
+         3. TCGplayer product photo for every other game (Pokemon etc.) */
+      const img = c.scryfallId
+        ? `https://cards.scryfall.io/normal/front/${c.scryfallId[0]}/${c.scryfallId[1]}/${c.scryfallId}.jpg`
+        : /magic/i.test(c.game || "")
+          ? `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(c.name)}&format=image&version=normal`
+          : c.tcgplayerId ? `https://product-images.tcgplayer.com/fit-in/437x437/${c.tcgplayerId}.jpg` : null;
       up.run(c.id, c.name, c.set_name, c.game, c.number, c.rarity, String(c.tcgplayerId ?? ""), img, v.condition, v.printing,
         Math.round(v.price * 100), v.priceChangesCount30d ?? 0, v.priceChange30d ?? 0);
       out.push(db.prepare("SELECT * FROM cards WHERE id=?").get(c.id));
