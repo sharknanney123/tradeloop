@@ -105,7 +105,7 @@ app.get("/api/search", auth, async (req, res) => {
 
 /* ----------------------------- binder ----------------------------- */
 app.get("/api/binder", auth, (req, res) => {
-  const rows = db.prepare("SELECT b.side, c.* FROM binder b JOIN cards c ON c.id=b.card_id WHERE b.user_id=?").all(req.session.uid);
+  const rows = db.prepare("SELECT b.side, b.for_trade, c.* FROM binder b JOIN cards c ON c.id=b.card_id WHERE b.user_id=?").all(req.session.uid);
   res.json({ have: rows.filter((r) => r.side === "have"), want: rows.filter((r) => r.side === "want") });
 });
 
@@ -122,6 +122,13 @@ app.post("/api/binder", auth, (req, res) => {
   res.json({ ok: true, toggled: existing ? "removed" : "added" });
 });
 
+app.post("/api/binder/fortrade", auth, (req, res) => {
+  const row = db.prepare("SELECT id, for_trade FROM binder WHERE user_id=? AND card_id=? AND side='have'").get(req.session.uid, req.body.cardId);
+  if (!row) return res.status(404).json({ error: "Card is not in your binder" });
+  db.prepare("UPDATE binder SET for_trade = 1 - for_trade WHERE id=?").run(row.id);
+  res.json({ for_trade: row.for_trade ? 0 : 1 });
+});
+
 /* ------------------------------ board ----------------------------- */
 app.get("/api/board", auth, (req, res) => {
   const cards = db.prepare(`
@@ -131,7 +138,15 @@ app.get("/api/board", auth, (req, res) => {
     FROM cards c
     WHERE EXISTS (SELECT 1 FROM binder b WHERE b.card_id=c.id)
     ORDER BY c.changes_30d DESC`).all();
-  res.json({ cards: cards.map((c) => ({ ...c, fast: isFast(c) })) });
+  /* open-to-offers listings: who has flagged this card for_trade (excluding you) */
+  const listings = db.prepare(`SELECT b.card_id, b.user_id, u.name FROM binder b JOIN users u ON u.id=b.user_id
+    WHERE b.side='have' AND b.for_trade=1`).all();
+  res.json({
+    cards: cards.map((c) => ({
+      ...c, fast: isFast(c),
+      open_offers: listings.filter((l) => l.card_id === c.id && l.user_id !== req.session.uid).map((l) => ({ ownerId: l.user_id, ownerName: l.name })),
+    })),
+  });
 });
 
 /* --------------------------- matching ----------------------------- */
@@ -208,19 +223,93 @@ app.post("/api/trades/lock", auth, (req, res) => {
   res.json({ tradeId: Number(t.lastInsertRowid), status: "locked", note: "All parties now ship to the hub." });
 });
 
-const tradeView = (id) => ({
-  trade: db.prepare("SELECT * FROM trades WHERE id=?").get(id),
-  legs: db.prepare(`SELECT l.*, uf.name from_name, ut.name to_name, c.name card_name, c.rarity, c.set_name
-    FROM trade_legs l JOIN users uf ON uf.id=l.from_user JOIN users ut ON ut.id=l.to_user JOIN cards c ON c.id=l.card_id
-    WHERE l.trade_id=?`).all(id),
-});
+const tradeView = (id) => {
+  const trade = db.prepare("SELECT * FROM trades WHERE id=?").get(id);
+  if (trade?.payer_id) trade.payer_name = db.prepare("SELECT name FROM users WHERE id=?").get(trade.payer_id)?.name;
+  if (trade?.payee_id) trade.payee_name = db.prepare("SELECT name FROM users WHERE id=?").get(trade.payee_id)?.name;
+  return {
+    trade,
+    legs: db.prepare(`SELECT l.*, uf.name from_name, ut.name to_name, c.name card_name, c.rarity, c.set_name
+      FROM trade_legs l JOIN users uf ON uf.id=l.from_user JOIN users ut ON ut.id=l.to_user JOIN cards c ON c.id=l.card_id
+      WHERE l.trade_id=?`).all(id),
+  };
+};
 
 app.get("/api/trades", auth, (req, res) => {
   const ids = db.prepare("SELECT DISTINCT trade_id FROM trade_legs WHERE from_user=? OR to_user=?").all(req.session.uid, req.session.uid);
   res.json({ trades: ids.map((r) => tradeView(r.trade_id)) });
 });
 
-/* --------------------------- hub admin ---------------------------- */
+/* ----------------------------- offers ----------------------------- */
+const offerView = (o) => ({
+  ...o,
+  card: db.prepare("SELECT * FROM cards WHERE id=?").get(o.card_id),
+  owner: db.prepare("SELECT name FROM users WHERE id=?").get(o.owner_id)?.name,
+  offerer: db.prepare("SELECT name FROM users WHERE id=?").get(o.offerer_id)?.name,
+  offered_cards: db.prepare("SELECT c.* FROM offer_cards oc JOIN cards c ON c.id=oc.card_id WHERE oc.offer_id=?").all(o.id),
+});
+
+app.post("/api/offers", auth, (req, res) => {
+  const { cardId, ownerId, cards = [], credit = 0 } = req.body || {};
+  const creditCents = Math.round(Number(credit) * 100) || 0;
+  if (creditCents < 0 || creditCents > 1000000) return res.status(400).json({ error: "Credit must be $0–$10,000" });
+  if (!cards.length && creditCents === 0) return res.status(400).json({ error: "Offer something — cards, credit, or both" });
+  if (ownerId === req.session.uid) return res.status(400).json({ error: "That's your own card" });
+  const listing = db.prepare("SELECT 1 FROM binder WHERE user_id=? AND card_id=? AND side='have' AND for_trade=1").get(ownerId, cardId);
+  if (!listing) return res.status(404).json({ error: "That card isn't open to offers" });
+  for (const cid of cards) {
+    if (!db.prepare("SELECT 1 FROM binder WHERE user_id=? AND card_id=? AND side='have'").get(req.session.uid, cid))
+      return res.status(400).json({ error: "You can only offer cards in your own binder" });
+  }
+  if (creditCents > 0 && balanceCents(req.session.uid) < creditCents)
+    return res.status(400).json({ error: `You're offering ${(creditCents / 100).toFixed(2)} but hold ${(balanceCents(req.session.uid) / 100).toFixed(2)} — add Loop Credit first` });
+  const r = db.prepare("INSERT INTO offers (card_id,owner_id,offerer_id,credit_cents) VALUES (?,?,?,?)").run(cardId, ownerId, req.session.uid, creditCents);
+  const oc = db.prepare("INSERT INTO offer_cards (offer_id,card_id) VALUES (?,?)");
+  for (const cid of cards) oc.run(Number(r.lastInsertRowid), cid);
+  res.json({ offerId: Number(r.lastInsertRowid), status: "pending" });
+});
+
+app.get("/api/offers", auth, (req, res) => {
+  const incoming = db.prepare("SELECT * FROM offers WHERE owner_id=? ORDER BY id DESC LIMIT 30").all(req.session.uid).map(offerView);
+  const outgoing = db.prepare("SELECT * FROM offers WHERE offerer_id=? ORDER BY id DESC LIMIT 30").all(req.session.uid).map(offerView);
+  res.json({ incoming, outgoing });
+});
+
+app.post("/api/offers/:id/decline", auth, (req, res) => {
+  db.prepare("UPDATE offers SET status='declined' WHERE id=? AND owner_id=? AND status='pending'").run(req.params.id, req.session.uid);
+  res.json({ ok: true });
+});
+app.post("/api/offers/:id/withdraw", auth, (req, res) => {
+  db.prepare("UPDATE offers SET status='withdrawn' WHERE id=? AND offerer_id=? AND status='pending'").run(req.params.id, req.session.uid);
+  res.json({ ok: true });
+});
+
+app.post("/api/offers/:id/accept", auth, (req, res) => {
+  const o = db.prepare("SELECT * FROM offers WHERE id=? AND owner_id=? AND status='pending'").get(req.params.id, req.session.uid);
+  if (!o) return res.status(404).json({ error: "Offer not found or already handled" });
+  /* validate everything still holds */
+  if (!db.prepare("SELECT 1 FROM binder WHERE user_id=? AND card_id=? AND side='have'").get(o.owner_id, o.card_id))
+    return res.status(400).json({ error: "You no longer have that card listed" });
+  const offered = db.prepare("SELECT card_id FROM offer_cards WHERE offer_id=?").all(o.id);
+  for (const { card_id } of offered) {
+    if (!db.prepare("SELECT 1 FROM binder WHERE user_id=? AND card_id=? AND side='have'").get(o.offerer_id, card_id))
+      return res.status(400).json({ error: "The offerer no longer has one of the offered cards" });
+  }
+  /* create a hub trade with the NEGOTIATED settlement */
+  const t = db.prepare("INSERT INTO trades (status,settlement,agreed_credit_cents,payer_id,payee_id) VALUES ('locked','agreed',?,?,?)")
+    .run(o.credit_cents, o.offerer_id, o.owner_id);
+  const tid = Number(t.lastInsertRowid);
+  const ins = db.prepare("INSERT INTO trade_legs (trade_id,from_user,to_user,card_id,value_cents) VALUES (?,?,?,?,?)");
+  const val = (cid) => db.prepare("SELECT price_cents FROM cards WHERE id=?").get(cid)?.price_cents ?? 0;
+  ins.run(tid, o.owner_id, o.offerer_id, o.card_id, val(o.card_id));
+  for (const { card_id } of offered) ins.run(tid, o.offerer_id, o.owner_id, card_id, val(card_id));
+  db.prepare("UPDATE offers SET status='accepted' WHERE id=?").run(o.id);
+  /* decline competing pending offers on the same listing */
+  db.prepare("UPDATE offers SET status='declined' WHERE card_id=? AND owner_id=? AND status='pending' AND id!=?").run(o.card_id, o.owner_id, o.id);
+  res.json({ ok: true, tradeId: tid, note: "Deal locked — both sides now ship to the hub." });
+});
+
+
 app.get("/api/admin/trades", auth, admin, (req, res) => {
   const ids = db.prepare("SELECT id FROM trades ORDER BY id DESC").all();
   res.json({ trades: ids.map((r) => tradeView(r.id)) });
@@ -238,18 +327,28 @@ app.post("/api/admin/trades/:id/release", auth, admin, (req, res) => {
   if (!trade || trade.status !== "locked") return res.status(400).json({ error: "Trade is not locked" });
   if (!legs.every((l) => l.received && l.checked)) return res.status(400).json({ error: "All packages must be received & checked" });
 
-  // settlement: receiver pays value, shipper is credited value (nets per user)
-  const settle = {};
-  legs.forEach((l) => {
-    settle[l.from_user] = (settle[l.from_user] || 0) + l.value_cents;
-    settle[l.to_user] = (settle[l.to_user] || 0) - l.value_cents;
-  });
-  for (const [uid, cents] of Object.entries(settle)) {
-    if (cents < 0 && balanceCents(+uid) < -cents)
-      return res.status(400).json({ error: `${db.prepare("SELECT name FROM users WHERE id=?").get(+uid).name} lacks credit to settle (${(-cents / 100).toFixed(2)} needed)` });
+  const ins = db.prepare("INSERT INTO ledger (user_id,delta_cents,reason,trade_id) VALUES (?,?,?,?)");
+  if (trade.settlement === "agreed") {
+    /* negotiated deal: the agreed credit moves payer → payee, nothing else */
+    if (trade.agreed_credit_cents > 0) {
+      if (balanceCents(trade.payer_id) < trade.agreed_credit_cents)
+        return res.status(400).json({ error: `${db.prepare("SELECT name FROM users WHERE id=?").get(trade.payer_id).name} lacks credit to settle the agreed $${(trade.agreed_credit_cents / 100).toFixed(2)}` });
+      ins.run(trade.payer_id, -trade.agreed_credit_cents, "settlement (agreed deal)", trade.id);
+      ins.run(trade.payee_id, trade.agreed_credit_cents, "settlement (agreed deal)", trade.id);
+    }
+  } else {
+    /* loop trade: market-value settlement — shipper credited, receiver debited */
+    const settle = {};
+    legs.forEach((l) => {
+      settle[l.from_user] = (settle[l.from_user] || 0) + l.value_cents;
+      settle[l.to_user] = (settle[l.to_user] || 0) - l.value_cents;
+    });
+    for (const [uid, cents] of Object.entries(settle)) {
+      if (cents < 0 && balanceCents(+uid) < -cents)
+        return res.status(400).json({ error: `${db.prepare("SELECT name FROM users WHERE id=?").get(+uid).name} lacks credit to settle (${(-cents / 100).toFixed(2)} needed)` });
+    }
+    for (const [uid, cents] of Object.entries(settle)) if (cents !== 0) ins.run(+uid, cents, "settlement", trade.id);
   }
-  const ins = db.prepare("INSERT INTO ledger (user_id,delta_cents,reason,trade_id) VALUES (?,?,'settlement',?)");
-  for (const [uid, cents] of Object.entries(settle)) if (cents !== 0) ins.run(+uid, cents, trade.id);
 
   // move cards: remove from shipper's have + receiver's want; add to receiver's have
   for (const l of legs) {

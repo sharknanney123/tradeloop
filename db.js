@@ -73,6 +73,27 @@ CREATE TABLE IF NOT EXISTS ledger (
 
 /* migration for databases created before image_url existed */
 try { db.exec("ALTER TABLE cards ADD COLUMN image_url TEXT"); } catch {}
+/* offers feature migrations */
+try { db.exec("ALTER TABLE binder ADD COLUMN for_trade INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE trades ADD COLUMN settlement TEXT DEFAULT 'market'"); } catch {}
+try { db.exec("ALTER TABLE trades ADD COLUMN agreed_credit_cents INTEGER DEFAULT 0"); } catch {}
+try { db.exec("ALTER TABLE trades ADD COLUMN payer_id INTEGER"); } catch {}
+try { db.exec("ALTER TABLE trades ADD COLUMN payee_id INTEGER"); } catch {}
+db.exec(`
+CREATE TABLE IF NOT EXISTS offers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id TEXT NOT NULL REFERENCES cards(id),       -- the card being asked for
+  owner_id INTEGER NOT NULL REFERENCES users(id),   -- who owns it
+  offerer_id INTEGER NOT NULL REFERENCES users(id), -- who is offering
+  credit_cents INTEGER DEFAULT 0,                   -- credit included in the offer
+  status TEXT DEFAULT 'pending',                    -- pending|accepted|declined|withdrawn
+  created_at TEXT DEFAULT (datetime('now'))
+);
+CREATE TABLE IF NOT EXISTS offer_cards (
+  offer_id INTEGER NOT NULL REFERENCES offers(id),
+  card_id TEXT NOT NULL REFERENCES cards(id)
+);
+`);
 
 /* Seed demo cards so the app works before a JustTCG key is added.
    Real searches replace these over time. */

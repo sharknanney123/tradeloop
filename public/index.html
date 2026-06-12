@@ -174,6 +174,18 @@
 
     <section id="tab-board" class="hidden"><div id="boardList"></div></section>
 
+    <section id="tab-offers" class="hidden">
+      <div class="card">
+        <h2 class="display">Offers on my cards</h2>
+        <p class="muted small">Deals proposed on cards you've marked <b>for trade</b>. Accepting locks a hub trade — both sides ship in, and the agreed credit settles when you release.</p>
+        <div id="incomingList"></div>
+      </div>
+      <div class="card">
+        <h2 class="display">Offers I've made</h2>
+        <div id="outgoingList"></div>
+      </div>
+    </section>
+
     <!-- BINDER: my collection (have) -->
     <section id="tab-binder" class="hidden">
       <div class="card">
@@ -266,7 +278,7 @@ async function doAuth(){
 async function logout(){await api('/api/logout',{method:'POST'});location.reload()}
 
 /* ---------- boot ---------- */
-const TABS=[['routes','Routes'],['board','Board'],['binder','My Binder'],['seeking','Seeking'],['wallet','Wallet']];
+const TABS=[['routes','Routes'],['board','Board'],['offers','Offers'],['binder','My Binder'],['seeking','Seeking'],['wallet','Wallet']];
 let activeTab='routes';
 async function boot(){
   try{const j=await api('/api/me');ME=j.user;$('balance').textContent=fmt(j.balance_cents);}
@@ -281,7 +293,7 @@ async function boot(){
 function showTab(id){activeTab=id;
   for(const [t] of [...TABS,['hub']])$('tab-'+t)?.classList.toggle('hidden',t!==id);
   document.querySelectorAll('nav button').forEach(b=>b.className=b.id==='tabbtn-'+id?'on':'off');
-  ({routes:loadRoutes,board:loadBoard,binder:loadBinder,seeking:loadBinder,wallet:loadLedger,hub:loadHub})[id]?.();
+  ({routes:loadRoutes,board:loadBoard,offers:loadOffers,binder:loadBinder,seeking:loadBinder,wallet:loadLedger,hub:loadHub})[id]?.();
 }
 
 /* ---------- routes ---------- */
@@ -305,18 +317,79 @@ async function lockRoute(legsJson){
   catch(e){toast(e.message)}
 }
 
-/* ---------- board ---------- */
+/* ---------- board + offer builder ---------- */
+let MYHAVE=[];
 async function loadBoard(){
-  const {cards}=await api('/api/board');
+  const [{cards},binder]=await Promise.all([api('/api/board'),api('/api/binder')]);
+  MYHAVE=binder.have;
   $('boardList').innerHTML=cards.length?`<div class="card">${cards.map(c=>`
-    <div class="cardrow">${thumb(c)}
+    <div class="cardrow" style="flex-wrap:wrap">${thumb(c)}
       <div class="info"><b class="small">${esc(c.name)}</b><span class="badge ${c.fast?'fast':'slow'}">${c.changes_30d} moves/30d</span>
+        ${c.open_offers.length?'<span class="badge" style="background:var(--wax);color:var(--cream)">OPEN TO OFFERS</span>':''}
         <div class="muted" style="font-size:11px">${esc(c.set_name||'')} · ${fmt(c.price_cents)} ${c.source==='justtcg'?'· JustTCG':''}</div></div>
       <div class="small" style="text-align:right">
         <div style="color:var(--gold)">bids: ${esc(c.bids||'—')}</div>
         <div class="muted">asks: ${esc(c.asks||'—')}</div></div>
+      ${c.open_offers.map(o=>`<button class="waxb checkbtn" onclick="openOfferPanel('${c.id}',${o.ownerId},'${esc(o.ownerName)}','${esc(c.name)}')">Make offer to ${esc(o.ownerName)}</button>`).join('')}
+      <div id="offer-panel-${c.id}" class="hidden" style="width:100%"></div>
     </div>`).join('')}</div>`:
     `<div class="card deep" style="text-align:center;border-style:dashed"><p class="muted">Nothing listed yet — be the first to add cards.</p></div>`;
+}
+function openOfferPanel(cardId,ownerId,ownerName,cardName){
+  const p=$('offer-panel-'+cardId);
+  if(!p.classList.contains('hidden')){p.classList.add('hidden');return}
+  p.classList.remove('hidden');
+  p.innerHTML=`<div class="settle" style="margin-top:8px">
+    <b class="small">Your offer to ${ownerName} for ${cardName}</b>
+    <div style="margin:6px 0 4px" class="muted small">Pick cards from your binder (optional):</div>
+    ${MYHAVE.length?MYHAVE.map(c=>`<label class="chip" style="display:inline-flex;gap:5px;align-items:center">
+      <input type="checkbox" value="${c.id}" data-offer="${cardId}" style="width:auto;margin:0">${esc(c.name)} · ${fmt(c.price_cents)}</label>`).join(''):'<span class="muted small">your binder is empty — credit-only offer it is</span>'}
+    <div style="margin:8px 0 4px" class="muted small">Plus Loop Credit (optional):</div>
+    <div class="row"><input id="offer-credit-${cardId}" type="number" min="0" step="1" placeholder="0" style="margin:0"/>
+      <button class="gold" onclick="sendOffer('${cardId}',${ownerId})">Send offer</button></div>
+  </div>`;
+}
+async function sendOffer(cardId,ownerId){
+  const cards=[...document.querySelectorAll(`input[data-offer="${cardId}"]:checked`)].map(i=>i.value);
+  const credit=Number($('offer-credit-'+cardId).value)||0;
+  try{
+    await api('/api/offers',{method:'POST',body:{cardId,ownerId,cards,credit}});
+    toast('Offer sent — you\'ll see their answer in the Offers tab.');
+    $('offer-panel-'+cardId).classList.add('hidden');
+  }catch(e){toast(e.message)}
+}
+
+/* ---------- offers tab ---------- */
+const offerSummary=(o)=>`
+  <div class="row" style="align-items:flex-start"><div class="info">
+    <div class="small"><b>${esc(o.offerer)}</b> offers for <em style="color:var(--gold)">${esc(o.card?.name)}</em>:</div>
+    <div class="small" style="margin-top:3px">${o.offered_cards.length?o.offered_cards.map(c=>`<span class="chip" style="cursor:default">${esc(c.name)} · ${fmt(c.price_cents)}</span>`).join(''):''}
+      ${o.credit_cents>0?`<span class="chip" style="cursor:default;border-color:var(--gold);color:var(--gold)">+ ${fmt(o.credit_cents)} credit</span>`:''}</div>
+    <div class="muted" style="font-size:10.5px;margin-top:3px">offer value ~${fmt(o.offered_cards.reduce((s,c)=>s+c.price_cents,0)+o.credit_cents)} vs card ${fmt(o.card?.price_cents??0)} · ${esc(o.created_at)}</div>
+  </div></div>`;
+async function loadOffers(){
+  const j=await api('/api/offers');
+  $('incomingList').innerHTML=j.incoming.length?j.incoming.map(o=>`
+    <div class="card deep" style="margin-top:10px">${offerSummary(o)}
+      ${o.status==='pending'?`<div style="margin-top:8px">
+        <button class="gold checkbtn" onclick="actOffer(${o.id},'accept')">Accept — lock the deal</button>
+        <button class="ghost checkbtn" onclick="actOffer(${o.id},'decline')">Decline</button></div>`
+      :`<span class="badge ${o.status==='accepted'?'fast':'slow'}" style="margin-top:6px">${o.status.toUpperCase()}</span>`}
+    </div>`).join(''):'<p class="muted small">No offers yet. Mark cards "for trade" in My Binder so people can bid on them.</p>';
+  $('outgoingList').innerHTML=j.outgoing.length?j.outgoing.map(o=>`
+    <div class="card deep" style="margin-top:10px">
+      <div class="small">To <b>${esc(o.owner)}</b> for <em style="color:var(--gold)">${esc(o.card?.name)}</em>
+        <span class="badge ${o.status==='accepted'?'fast':'slow'}">${o.status.toUpperCase()}</span></div>
+      <div class="small" style="margin-top:3px">${o.offered_cards.map(c=>`<span class="chip" style="cursor:default">${esc(c.name)}</span>`).join('')}
+        ${o.credit_cents>0?`<span class="chip" style="cursor:default;border-color:var(--gold);color:var(--gold)">+ ${fmt(o.credit_cents)}</span>`:''}</div>
+      ${o.status==='pending'?`<button class="ghost checkbtn" style="margin-top:6px" onclick="actOffer(${o.id},'withdraw')">Withdraw</button>`:''}
+    </div>`).join(''):'<p class="muted small">You haven\'t made any offers. Find "open to offers" cards on the Board.</p>';
+}
+async function actOffer(id,action){
+  try{const j=await api('/api/offers/'+id+'/'+action,{method:'POST'});
+    toast(action==='accept'?('Deal locked — trade #'+j.tradeId+'. Both sides ship to the hub.'):'Done.');
+    loadOffers();}
+  catch(e){toast(e.message)}
 }
 
 /* ---------- binder & seeking ---------- */
@@ -338,16 +411,25 @@ async function addCard(id,side){try{const j=await api('/api/binder',{method:'POS
 async function loadBinder(){
   const j=await api('/api/binder');
   const grid=(list,side)=>list.map(c=>`
-    <div class="gcard" title="tap to remove" onclick="addCard('${c.id}','${side}')">
+    <div class="gcard">
       ${c.image_url?`<img src="${esc(c.image_url)}" loading="lazy" onerror="this.outerHTML='<div class=ph2>✦</div>'">`:'<div class="ph2">✦</div>'}
-      <div class="nm">${esc(c.name)}</div><div class="pr">${fmt(c.price_cents)}</div><span class="x">✕</span>
+      <div class="nm">${esc(c.name)}</div><div class="pr">${fmt(c.price_cents)}</div>
+      ${side==='have'?`<button class="checkbtn full ${c.for_trade?'waxb':'ghost'}" style="margin-top:6px" onclick="toggleForTrade('${c.id}')">${c.for_trade?'✓ for trade':'mark for trade'}</button>`:''}
+      <span class="x" title="remove" onclick="addCard('${c.id}','${side}')" style="cursor:pointer">✕</span>
     </div>`).join('');
   $('haveGrid').innerHTML=grid(j.have,'have');
   $('haveEmpty').classList.toggle('hidden',j.have.length>0);
   const total=j.have.reduce((s,c)=>s+c.price_cents,0);
-  $('binderStats').textContent=j.have.length?`${j.have.length} card${j.have.length>1?'s':''} · ${fmt(total)} total value`:'';
+  const listed=j.have.filter(c=>c.for_trade).length;
+  $('binderStats').textContent=j.have.length?`${j.have.length} card${j.have.length>1?'s':''} · ${fmt(total)} · ${listed} for trade`:'';
   $('wantGrid').innerHTML=grid(j.want,'want');
   $('wantEmpty').classList.toggle('hidden',j.want.length>0);
+}
+async function toggleForTrade(cardId){
+  try{const j=await api('/api/binder/fortrade',{method:'POST',body:{cardId}});
+    toast(j.for_trade?'Listed for trade — anyone can now make you an offer.':'No longer accepting offers on that card.');
+    loadBinder();}
+  catch(e){toast(e.message)}
 }
 function syncVelBtn(){
   const on=ME.want_mode==='velocity';
@@ -377,7 +459,8 @@ async function loadHub(){
   const {trades}=await api('/api/admin/trades');
   $('hubList').innerHTML=trades.length?trades.map(({trade,legs})=>`
     <div class="card deep" style="margin-top:10px">
-      <div class="row"><b>Loop #${trade.id}</b><span class="badge ${trade.status==='closed'?'fast':'slow'}">${trade.status.toUpperCase()}</span></div>
+      <div class="row"><b>Loop #${trade.id}${trade.settlement==='agreed'?' · negotiated deal':''}</b><span class="badge ${trade.status==='closed'?'fast':'slow'}">${trade.status.toUpperCase()}</span></div>
+      ${trade.settlement==='agreed'&&trade.agreed_credit_cents>0?`<div class="settle"><span class="pays">${esc(trade.payer_name)} pays the agreed ${fmt(trade.agreed_credit_cents)}</span> → <span class="gets">${esc(trade.payee_name)}</span> at release</div>`:''}
       ${legs.map(l=>`<div class="legrow"><b>${esc(l.from_name)}</b> → <em>${esc(l.card_name)}</em> (${fmt(l.value_cents)}) → <b>${esc(l.to_name)}</b><br>
         ${trade.status==='locked'?`
         <button class="checkbtn ${l.received?'gold':'ghost'}" onclick="toggleLeg(${l.id},'received')">${l.received?'✓ ':''}received</button>
