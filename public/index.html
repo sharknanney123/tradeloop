@@ -1,0 +1,398 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TradeLoop — the multi-party card exchange</title>
+<style>
+  :root{
+    --felt:#0E3B2C; --felt-deep:#0A2C21; --panel:#155741; --line:#23745A;
+    --cream:#F7F1E3; --cream-dim:#E4DCC8; --gold:#E2B65A; --wax:#C8502F;
+    --mist:rgba(247,241,227,.62); --ink:#13211B; --green:#8FD6A8; --red:#E8896B;
+  }
+  *{box-sizing:border-box;margin:0}
+  body{font-family:'Avenir Next','Segoe UI',system-ui,sans-serif;color:var(--cream);
+    background:radial-gradient(ellipse at 50% -10%, var(--panel) 0%, var(--felt) 45%, var(--felt-deep) 100%);
+    min-height:100vh;padding-bottom:60px}
+  .display{font-family:Georgia,'Times New Roman',serif}
+  main{max-width:620px;margin:0 auto;padding:0 16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;margin-bottom:16px}
+  .deep{background:var(--felt-deep)}
+  input,select{width:100%;padding:10px 12px;border-radius:8px;border:1px solid var(--line);
+    background:var(--felt-deep);color:var(--cream);font-size:14px;margin-bottom:8px}
+  button{cursor:pointer;border:none;border-radius:8px;padding:10px 14px;font-weight:700;font-size:13px}
+  .gold{background:var(--gold);color:var(--ink)} .waxb{background:var(--wax);color:var(--cream)}
+  .ghost{background:transparent;color:var(--cream-dim);border:1px solid var(--line)}
+  .full{width:100%}
+  nav{display:flex;gap:6px;justify-content:center;flex-wrap:wrap;margin:14px 0}
+  nav button{border-radius:999px;padding:7px 13px;font-size:12px}
+  nav .on{background:var(--gold);color:var(--ink)} nav .off{background:transparent;color:var(--cream-dim);border:1px solid var(--line)}
+  .row{display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .muted{color:var(--mist);font-size:12px} .small{font-size:12px}
+  .badge{display:inline-block;font-size:9.5px;font-weight:700;border-radius:4px;padding:1px 5px;vertical-align:middle;margin-left:5px}
+  .fast{background:var(--green);color:var(--ink)} .slow{border:1px solid var(--line);color:var(--mist)}
+  .legrow{padding:4px 0;font-size:13px;color:var(--cream-dim)} .legrow b{color:var(--cream)} .legrow em{color:var(--gold);font-style:italic}
+  .settle{background:var(--felt-deep);border-radius:8px;padding:8px 12px;margin:8px 0;font-size:12px}
+  .pays{color:var(--red)} .gets{color:var(--green)}
+  .wallet{position:sticky;top:0;z-index:5;background:var(--felt-deep);border-bottom:1px solid var(--line);
+    display:flex;justify-content:space-between;align-items:center;padding:10px 16px}
+  .wallet .bal{color:var(--gold);font-size:18px;font-weight:700}
+  .ticker{text-align:center;background:rgba(0,0,0,.18);color:var(--mist);font-size:10.5px;padding:4px}
+  #toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--cream);color:var(--ink);
+    padding:10px 16px;border-radius:10px;font-size:12.5px;font-weight:600;max-width:88%;display:none;z-index:50;box-shadow:0 6px 24px rgba(0,0,0,.35)}
+  h2{font-size:18px;margin-bottom:6px} h3{font-size:13px;color:var(--gold);letter-spacing:.1em;margin:12px 0 6px}
+  .checkbtn{font-size:11px;padding:6px 9px;margin:4px 4px 0 0}
+  .hidden{display:none}
+
+  /* ------- landing ------- */
+  .hero{text-align:center;padding:48px 16px 22px}
+  .hero .kicker{color:var(--gold);font-size:11px;letter-spacing:.3em;font-weight:700}
+  .hero h1{font-size:52px;line-height:1.02;margin-top:8px}
+  .hero h1 span{color:var(--gold)}
+  .hero p{color:var(--cream-dim);font-size:15.5px;max-width:480px;margin:14px auto 0;line-height:1.55}
+  .cta{display:flex;gap:10px;justify-content:center;margin-top:22px}
+  .cta button{padding:12px 22px;font-size:14px;border-radius:10px}
+  .steps{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:26px 0 6px}
+  @media(max-width:560px){.steps{grid-template-columns:1fr}}
+  .step{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:16px;text-align:left}
+  .step .n{width:26px;height:26px;border-radius:50%;background:var(--gold);color:var(--ink);font-weight:800;
+    display:flex;align-items:center;justify-content:center;font-size:13px;margin-bottom:8px}
+  .step b{font-size:14px} .step p{color:var(--mist);font-size:12.5px;margin-top:4px;line-height:1.5}
+  .loopviz{margin:10px auto 0;display:block}
+  .why{margin-top:8px}
+  .why .row{align-items:flex-start;padding:9px 0;border-top:1px solid var(--line);gap:12px}
+  .why .row:first-child{border-top:none}
+  .why .dot{color:var(--gold);font-size:16px;line-height:1.3}
+  .why b{font-size:13.5px} .why p{color:var(--mist);font-size:12.5px;margin-top:2px;line-height:1.5}
+
+  /* ------- card visuals ------- */
+  .thumb{width:46px;height:64px;border-radius:6px;object-fit:cover;background:var(--felt-deep);
+    border:1px solid var(--line);flex-shrink:0}
+  .thumb.ph{display:flex;align-items:center;justify-content:center;color:var(--gold);
+    font-family:Georgia,serif;font-size:20px;font-weight:700}
+  .cardrow{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid var(--line)}
+  .cardrow:last-child{border-bottom:none}
+  .cardrow .info{flex:1;min-width:0}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:10px;margin-top:8px}
+  .gcard{background:var(--felt-deep);border:1px solid var(--line);border-radius:10px;padding:8px;text-align:center;
+    cursor:pointer;position:relative;transition:border-color .15s}
+  .gcard:hover{border-color:var(--wax)}
+  .gcard img,.gcard .ph2{width:100%;aspect-ratio:43/60;border-radius:6px;object-fit:cover;background:var(--felt)}
+  .gcard .ph2{display:flex;align-items:center;justify-content:center;color:var(--gold);font-family:Georgia,serif;font-size:28px}
+  .gcard .nm{font-size:11px;font-weight:700;margin-top:6px;color:var(--cream);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .gcard .pr{font-size:11px;color:var(--gold)}
+  .gcard .x{position:absolute;top:4px;right:6px;color:var(--mist);font-size:13px}
+  .statline{display:flex;gap:14px;margin:4px 0 2px}
+  .statline div b{display:block;font-size:16px;color:var(--gold)} .statline div span{font-size:10.5px;color:var(--mist)}
+</style>
+</head>
+<body>
+
+<div id="walletBar" class="wallet hidden">
+  <div><div class="muted" style="font-size:10px;letter-spacing:.1em;font-weight:700">YOUR LOOP CREDIT</div>
+    <div class="bal" id="balance">$0.00</div></div>
+  <div>
+    <button class="gold" onclick="deposit(25)">+ $25</button>
+    <button class="gold" onclick="deposit(100)">+ $100</button>
+    <button class="ghost" onclick="logout()">Log out</button>
+  </div>
+</div>
+<div id="ticker" class="ticker hidden">deposits are SIMULATED in this preview · money in, only cards out</div>
+
+<!-- ==================== LANDING ==================== -->
+<div id="landing">
+  <div class="hero">
+    <div class="kicker">FOR PLAYERS &amp; STORES · ONE HUB · ONE ECONOMY</div>
+    <h1 class="display">Trade<span>Loop</span></h1>
+    <p>Nobody has to want <i>your</i> card. List what you have and what you're hunting, and the matching
+      engine finds a <b style="color:var(--gold)">loop</b> — a chain of traders where every card moves one
+      seat over and <b style="color:var(--gold)">everyone</b> leaves with what they wanted.</p>
+
+    <svg class="loopviz" width="280" height="150" viewBox="0 0 280 150" aria-hidden="true">
+      <defs><marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+        <path d="M0 0L10 5L0 10z" fill="#E2B65A"/></marker></defs>
+      <circle cx="140" cy="75" r="20" fill="#C8502F"/><text x="140" y="79" text-anchor="middle" font-size="10" font-weight="700" fill="#F7F1E3">HUB</text>
+      <circle cx="48" cy="75" r="24" fill="#0A2C21" stroke="#E2B65A" stroke-width="1.5"/><text x="48" y="79" text-anchor="middle" font-size="11" fill="#F7F1E3" font-weight="700">A</text>
+      <circle cx="186" cy="22" r="24" fill="#0A2C21" stroke="#E2B65A" stroke-width="1.5"/><text x="186" y="26" text-anchor="middle" font-size="11" fill="#F7F1E3" font-weight="700">B</text>
+      <circle cx="186" cy="128" r="24" fill="#0A2C21" stroke="#E2B65A" stroke-width="1.5"/><text x="186" y="132" text-anchor="middle" font-size="11" fill="#F7F1E3" font-weight="700">C</text>
+      <path d="M 70 62 Q 110 30 162 28" fill="none" stroke="#E2B65A" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#m)"/>
+      <path d="M 192 46 Q 200 75 192 104" fill="none" stroke="#E2B65A" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#m)"/>
+      <path d="M 162 122 Q 110 120 70 88" fill="none" stroke="#E2B65A" stroke-width="1.6" stroke-dasharray="5 4" marker-end="url(#m)"/>
+    </svg>
+
+    <div class="cta">
+      <button class="gold" onclick="openAuth(false)">Join the table — it's free</button>
+      <button class="ghost" onclick="openAuth(true)">Log in</button>
+    </div>
+  </div>
+
+  <main>
+    <div class="steps">
+      <div class="step"><div class="n">1</div><b>List your cards</b>
+        <p>Put spare cards in your binder and name the cards your deck is missing — or flip on velocity mode and accept anything that's selling fast.</p></div>
+      <div class="step"><div class="n">2</div><b>The engine finds a loop</b>
+        <p>Direct swaps when they exist, 3- and 4-way chains when they don't. Loop Credit automatically squares uneven values, so trades don't die over a few dollars.</p></div>
+      <div class="step"><div class="n">3</div><b>Ship to one trusted hub</b>
+        <p>No shipping to strangers. Every card goes to the TradeLoop hub, gets checked against its listing, and only then ships out to its new owner.</p></div>
+    </div>
+
+    <div class="card why">
+      <h2 class="display">Why trade here instead of selling?</h2>
+      <div class="row"><span class="dot">✦</span><div><b>Keep the full value of your cards.</b>
+        <p>Marketplace fees and shipping eat 15%+ of a cash sale. In a loop, your $40 card buys $40 of someone else's cards.</p></div></div>
+      <div class="row"><span class="dot">✦</span><div><b>Trades that were impossible become easy.</b>
+        <p>In person, a trade needs two people who each want exactly what the other has. The loop engine only needs a chain to exist somewhere in the community.</p></div></div>
+      <div class="row"><span class="dot">✦</span><div><b>The hub takes the risk out.</b>
+        <p>Every package is opened and verified at the hub before anything ships onward. A misgraded card voids the loop — nobody loses their cards.</p></div></div>
+      <div class="row"><span class="dot">✦</span><div><b>Built for players and stores.</b>
+        <p>Players hunt the exact cards their deck needs. Stores dump slow stock and take in whatever the market data says is moving fastest.</p></div></div>
+    </div>
+
+    <!-- AUTH -->
+    <div id="authView" class="card hidden">
+      <h2 class="display" id="authTitle">Join the table</h2>
+      <input id="name" placeholder="Display name" />
+      <input id="email" placeholder="Email" type="email" />
+      <input id="password" placeholder="Password (8+ characters)" type="password" />
+      <button class="gold full" id="authBtn" onclick="doAuth()">Create account</button>
+      <p class="muted" style="margin-top:8px;text-align:center">
+        <a href="#" style="color:var(--gold)" onclick="toggleAuth();return false" id="authSwap">Already have an account? Log in</a>
+      </p>
+    </div>
+  </main>
+</div>
+
+<!-- ==================== APP ==================== -->
+<div id="appView" class="hidden">
+  <header style="text-align:center;padding:18px 16px 0">
+    <h1 class="display" style="font-size:30px">Trade<span style="color:var(--gold)">Loop</span></h1>
+  </header>
+  <main>
+    <nav id="tabs"></nav>
+
+    <section id="tab-routes"><div id="routesList"></div></section>
+
+    <section id="tab-board" class="hidden"><div id="boardList"></div></section>
+
+    <!-- BINDER: my collection (have) -->
+    <section id="tab-binder" class="hidden">
+      <div class="card">
+        <div class="row"><h2 class="display">My binder</h2><span class="muted small" id="binderStats"></span></div>
+        <p class="muted small">The cards you own and are willing to trade. Tap a card to remove it.</p>
+        <div id="haveGrid" class="grid"></div>
+        <p class="muted small hidden" id="haveEmpty" style="margin-top:8px">Your binder is empty — add cards below.</p>
+      </div>
+      <div class="card">
+        <h2 class="display">Add cards I own</h2>
+        <div class="row"><input id="searchHave" placeholder="Search any card (e.g. Charizard ex)" style="margin-bottom:0"/>
+          <button class="gold" onclick="doSearch('have')">Search</button></div>
+        <p class="muted small" id="noteHave" style="margin-top:6px"></p>
+        <div id="resultsHave"></div>
+      </div>
+    </section>
+
+    <!-- SEEKING: wants + velocity -->
+    <section id="tab-seeking" class="hidden">
+      <div class="card">
+        <div class="row"><h2 class="display">Seeking</h2>
+          <button class="ghost" id="velBtn" onclick="toggleVelocity()">Velocity mode: off</button></div>
+        <p class="muted small">The cards you're hunting. The engine builds loops that end with these landing in your binder.
+          Velocity mode ignores this list and matches you with <b>any</b> fast-moving card — built for stores clearing stock.</p>
+        <div id="velNote" class="settle hidden" style="border:1px solid var(--green);color:var(--green)">
+          Velocity mode is ON — your seek list is "anything that moves." The list below is paused.</div>
+        <div id="wantGrid" class="grid"></div>
+        <p class="muted small hidden" id="wantEmpty" style="margin-top:8px">You're not seeking anything yet — search below.</p>
+      </div>
+      <div class="card">
+        <h2 class="display">Add cards I'm seeking</h2>
+        <div class="row"><input id="searchWant" placeholder="Search any card" style="margin-bottom:0"/>
+          <button class="gold" onclick="doSearch('want')">Search</button></div>
+        <p class="muted small" id="noteWant" style="margin-top:6px"></p>
+        <div id="resultsWant"></div>
+      </div>
+    </section>
+
+    <section id="tab-wallet" class="hidden">
+      <div class="card">
+        <h2 class="display">Loop Credit ledger</h2>
+        <p class="muted small">Credit comes in through deposits and trade settlements, and is only spendable inside the loop — there is no cash-out. Deposits here are <b>simulated</b> until a payment processor is connected.</p>
+        <div id="ledgerList"></div>
+      </div>
+    </section>
+
+    <section id="tab-hub" class="hidden">
+      <div class="card" style="border-color:var(--wax)">
+        <h2 class="display">Hub operator console</h2>
+        <p class="muted small">Check packages in, verify condition, then release. Settlements move Loop Credit between members automatically.</p>
+        <div id="hubList"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="toast"></div>
+
+<script>
+let ME=null, isLogin=false;
+const $=(id)=>document.getElementById(id);
+const fmt=(c)=>'$'+(c/100).toLocaleString(undefined,{minimumFractionDigits:2});
+const esc=(s)=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function toast(m){const t=$('toast');t.textContent=m;t.style.display='block';setTimeout(()=>t.style.display='none',2800)}
+async function api(path,opts={}){
+  const r=await fetch(path,{headers:{'Content-Type':'application/json'},...opts,body:opts.body?JSON.stringify(opts.body):undefined});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){throw new Error(j.error||r.statusText)}
+  return j;
+}
+const thumb=(c,cls='thumb')=> c.image_url
+  ? `<img class="${cls}" src="${esc(c.image_url)}" loading="lazy" onerror="this.outerHTML='<div class=\\'${cls} ph\\'>✦</div>'">`
+  : `<div class="${cls} ph">✦</div>`;
+
+/* ---------- landing / auth ---------- */
+function openAuth(login){isLogin=!login;toggleAuth();$('authView').classList.remove('hidden');
+  $('authView').scrollIntoView({behavior:'smooth'});setTimeout(()=>$(login?'email':'name').focus(),400)}
+function toggleAuth(){isLogin=!isLogin;$('name').classList.toggle('hidden',isLogin);
+  $('authTitle').textContent=isLogin?'Welcome back':'Join the table';
+  $('authBtn').textContent=isLogin?'Log in':'Create account';
+  $('authSwap').textContent=isLogin?'New here? Create an account':'Already have an account? Log in';}
+async function doAuth(){
+  try{
+    const body={email:$('email').value,password:$('password').value,name:$('name').value};
+    const j=await api(isLogin?'/api/login':'/api/register',{method:'POST',body});
+    if(j.note)toast(j.note);
+    await boot();
+  }catch(e){toast(e.message)}
+}
+async function logout(){await api('/api/logout',{method:'POST'});location.reload()}
+
+/* ---------- boot ---------- */
+const TABS=[['routes','Routes'],['board','Board'],['binder','My Binder'],['seeking','Seeking'],['wallet','Wallet']];
+let activeTab='routes';
+async function boot(){
+  try{const j=await api('/api/me');ME=j.user;$('balance').textContent=fmt(j.balance_cents);}
+  catch{return}
+  $('landing').classList.add('hidden');$('appView').classList.remove('hidden');
+  $('walletBar').classList.remove('hidden');$('ticker').classList.remove('hidden');
+  const tabs=[...TABS];if(ME.is_admin)tabs.push(['hub','Hub']);
+  $('tabs').innerHTML=tabs.map(([id,l])=>`<button id="tabbtn-${id}" class="${id===activeTab?'on':'off'}" onclick="showTab('${id}')">${l}</button>`).join('');
+  syncVelBtn();
+  showTab(activeTab);
+}
+function showTab(id){activeTab=id;
+  for(const [t] of [...TABS,['hub']])$('tab-'+t)?.classList.toggle('hidden',t!==id);
+  document.querySelectorAll('nav button').forEach(b=>b.className=b.id==='tabbtn-'+id?'on':'off');
+  ({routes:loadRoutes,board:loadBoard,binder:loadBinder,seeking:loadBinder,wallet:loadLedger,hub:loadHub})[id]?.();
+}
+
+/* ---------- routes ---------- */
+async function loadRoutes(){
+  const {routes}=await api('/api/matches');
+  $('routesList').innerHTML=routes.length?routes.map((r,i)=>`
+    <div class="card">
+      <div class="row"><b style="color:var(--gold);font-size:11px;letter-spacing:.1em">${r.legs.length===2?'DIRECT SWAP':r.legs.length+'-WAY LOOP'}</b>
+        <span class="muted small">all via hub</span></div>
+      ${r.legs.map(l=>`<div class="cardrow">${thumb(l.card)}<div class="info legrow" style="border:none;padding:0">
+        <b>${esc(l.fromName)}</b> ships <em>${esc(l.card.name)}</em> (${fmt(l.card.price_cents)}) → <b>${esc(l.toName)}</b>
+        ${l.card.changes_30d>=45?'<span class="badge fast">'+l.card.changes_30d+' moves/30d</span>':''}</div></div>`).join('')}
+      <div class="settle">${r.settlement.filter(s=>s.cents!==0).map(s=>`<div class="${s.cents>0?'pays':'gets'}">${esc(s.name)} ${s.cents>0?'pays '+fmt(s.cents):'is credited '+fmt(-s.cents)}</div>`).join('')||'<span class="muted">even trade — no credit moves</span>'}</div>
+      <button class="waxb full" onclick='lockRoute(${JSON.stringify(JSON.stringify(r.legs.map(l=>({from:l.from,to:l.to,card:l.card.id}))))})'>Lock route — everyone ships to the hub</button>
+    </div>`).join(''):
+    `<div class="card deep" style="text-align:center;border-style:dashed"><p class="muted">No closed loops yet. Add cards in <b>My Binder</b> and <b>Seeking</b> — one new listing can complete a chain for everyone.</p></div>`;
+}
+async function lockRoute(legsJson){
+  try{const j=await api('/api/trades/lock',{method:'POST',body:{legs:JSON.parse(legsJson)}});
+    toast('Route #'+j.tradeId+' locked. '+j.note);loadRoutes();}
+  catch(e){toast(e.message)}
+}
+
+/* ---------- board ---------- */
+async function loadBoard(){
+  const {cards}=await api('/api/board');
+  $('boardList').innerHTML=cards.length?`<div class="card">${cards.map(c=>`
+    <div class="cardrow">${thumb(c)}
+      <div class="info"><b class="small">${esc(c.name)}</b><span class="badge ${c.fast?'fast':'slow'}">${c.changes_30d} moves/30d</span>
+        <div class="muted" style="font-size:11px">${esc(c.set_name||'')} · ${fmt(c.price_cents)} ${c.source==='justtcg'?'· JustTCG':''}</div></div>
+      <div class="small" style="text-align:right">
+        <div style="color:var(--gold)">bids: ${esc(c.bids||'—')}</div>
+        <div class="muted">asks: ${esc(c.asks||'—')}</div></div>
+    </div>`).join('')}</div>`:
+    `<div class="card deep" style="text-align:center;border-style:dashed"><p class="muted">Nothing listed yet — be the first to add cards.</p></div>`;
+}
+
+/* ---------- binder & seeking ---------- */
+async function doSearch(side){
+  const box=side==='have'?'searchHave':'searchWant', note=side==='have'?'noteHave':'noteWant', out=side==='have'?'resultsHave':'resultsWant';
+  const q=$(box).value.trim();if(!q)return;
+  $(note).textContent='Searching…';
+  try{const j=await api('/api/search?q='+encodeURIComponent(q));
+    $(note).textContent=j.note||('source: '+j.source);
+    $(out).innerHTML=j.cards.map(c=>`
+      <div class="cardrow">${thumb(c)}
+        <div class="info"><b class="small">${esc(c.name)}</b><span class="badge ${c.changes_30d>=45?'fast':'slow'}">${c.changes_30d} moves/30d</span>
+          <div class="muted" style="font-size:11px">${esc(c.set_name||'')} ${c.number?'· '+esc(c.number):''} · ${fmt(c.price_cents)}</div></div>
+        <button class="${side==='have'?'ghost':'gold'} checkbtn" onclick="addCard('${c.id}','${side}')">${side==='have'?'+ binder':'+ seeking'}</button>
+      </div>`).join('')||'<p class="muted small" style="padding:6px 0">No results.</p>';
+  }catch(e){$(note).textContent=e.message}
+}
+async function addCard(id,side){try{const j=await api('/api/binder',{method:'POST',body:{cardId:id,side}});toast((side==='have'?'binder ':'seeking ')+j.toggled);loadBinder();}catch(e){toast(e.message)}}
+async function loadBinder(){
+  const j=await api('/api/binder');
+  const grid=(list,side)=>list.map(c=>`
+    <div class="gcard" title="tap to remove" onclick="addCard('${c.id}','${side}')">
+      ${c.image_url?`<img src="${esc(c.image_url)}" loading="lazy" onerror="this.outerHTML='<div class=ph2>✦</div>'">`:'<div class="ph2">✦</div>'}
+      <div class="nm">${esc(c.name)}</div><div class="pr">${fmt(c.price_cents)}</div><span class="x">✕</span>
+    </div>`).join('');
+  $('haveGrid').innerHTML=grid(j.have,'have');
+  $('haveEmpty').classList.toggle('hidden',j.have.length>0);
+  const total=j.have.reduce((s,c)=>s+c.price_cents,0);
+  $('binderStats').textContent=j.have.length?`${j.have.length} card${j.have.length>1?'s':''} · ${fmt(total)} total value`:'';
+  $('wantGrid').innerHTML=grid(j.want,'want');
+  $('wantEmpty').classList.toggle('hidden',j.want.length>0);
+}
+function syncVelBtn(){
+  const on=ME.want_mode==='velocity';
+  $('velBtn').textContent='Velocity mode: '+(on?'ON':'off');
+  $('velBtn').className=on?'gold':'ghost';
+  $('velNote').classList.toggle('hidden',!on);
+}
+async function toggleVelocity(){
+  const mode=ME.want_mode==='velocity'?'specific':'velocity';
+  await api('/api/wantmode',{method:'POST',body:{mode}});ME.want_mode=mode;syncVelBtn();
+  toast(mode==='velocity'?'You now match with ANY fast-moving card.':'Back to specific seeks.');
+}
+
+/* ---------- wallet ---------- */
+async function deposit(amount){try{const j=await api('/api/deposit',{method:'POST',body:{amount}});$('balance').textContent=fmt(j.balance_cents);toast('+$'+amount+' Loop Credit (simulated). It stays in the loop.');if(activeTab==='wallet')loadLedger();}catch(e){toast(e.message)}}
+async function loadLedger(){
+  const j=await api('/api/ledger');$('balance').textContent=fmt(j.balance_cents);
+  $('ledgerList').innerHTML=j.entries.length?j.entries.map(e=>`
+    <div class="row small" style="padding:6px 0;border-bottom:1px solid var(--line)">
+      <span class="muted">${esc(e.reason)}${e.trade_id?' · loop #'+e.trade_id:''}<br>${esc(e.created_at)}</span>
+      <b class="${e.delta_cents>0?'gets':'pays'}">${e.delta_cents>0?'+':''}${fmt(e.delta_cents)}</b>
+    </div>`).join(''):'<p class="muted small">No activity yet.</p>';
+}
+
+/* ---------- hub ---------- */
+async function loadHub(){
+  const {trades}=await api('/api/admin/trades');
+  $('hubList').innerHTML=trades.length?trades.map(({trade,legs})=>`
+    <div class="card deep" style="margin-top:10px">
+      <div class="row"><b>Loop #${trade.id}</b><span class="badge ${trade.status==='closed'?'fast':'slow'}">${trade.status.toUpperCase()}</span></div>
+      ${legs.map(l=>`<div class="legrow"><b>${esc(l.from_name)}</b> → <em>${esc(l.card_name)}</em> (${fmt(l.value_cents)}) → <b>${esc(l.to_name)}</b><br>
+        ${trade.status==='locked'?`
+        <button class="checkbtn ${l.received?'gold':'ghost'}" onclick="toggleLeg(${l.id},'received')">${l.received?'✓ ':''}received</button>
+        <button class="checkbtn ${l.checked?'gold':'ghost'}" onclick="toggleLeg(${l.id},'checked')">${l.checked?'✓ ':''}condition ok</button>`:''}
+      </div>`).join('')}
+      ${trade.status==='locked'?`
+        <button class="waxb full" style="margin-top:8px" onclick="releaseTrade(${trade.id})">Release outbound shipments</button>
+        <button class="ghost full" style="margin-top:6px" onclick="voidTrade(${trade.id})">void loop</button>`:''}
+    </div>`).join(''):'<p class="muted small">No loops yet. When members lock a route, packages land here.</p>';
+}
+async function toggleLeg(id,field){await api('/api/admin/legs/'+id+'/toggle',{method:'POST',body:{field}});loadHub()}
+async function releaseTrade(id){try{await api('/api/admin/trades/'+id+'/release',{method:'POST'});toast('Loop #'+id+' closed — credits rebalanced.');loadHub()}catch(e){toast(e.message)}}
+async function voidTrade(id){await api('/api/admin/trades/'+id+'/void',{method:'POST'});toast('Loop voided.');loadHub()}
+
+boot();
+</script>
+</body>
+</html>
