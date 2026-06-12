@@ -11,26 +11,41 @@ const path = require("path");
 const { db, isFast, balanceCents } = require("./db");
 
 const app = express();
-app.use(express.json());
+app.set("trust proxy", 1); // Render runs behind a proxy
+app.use(express.json({ limit: "100kb" }));
 app.use(express.static(path.join(__dirname, "public")));
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "dev-secret-change-me",
     resave: false,
     saveUninitialized: false,
-    cookie: { httpOnly: true, sameSite: "lax", maxAge: 30 * 24 * 3600 * 1000 },
+    cookie: { httpOnly: true, sameSite: "lax", secure: "auto", maxAge: 30 * 24 * 3600 * 1000 },
   })
 );
+
+/* simple in-memory rate limiter for auth endpoints (20 tries / 15 min / IP) */
+const hits = new Map();
+function rateLimit(req, res, next) {
+  const now = Date.now();
+  const rec = hits.get(req.ip) || { n: 0, reset: now + 15 * 60 * 1000 };
+  if (now > rec.reset) { rec.n = 0; rec.reset = now + 15 * 60 * 1000; }
+  if (++rec.n > 20) return res.status(429).json({ error: "Too many attempts — try again in a few minutes" });
+  hits.set(req.ip, rec);
+  next();
+}
 
 const auth = (req, res, next) => (req.session.uid ? next() : res.status(401).json({ error: "Login required" }));
 const admin = (req, res, next) => {
   const u = db.prepare("SELECT is_admin FROM users WHERE id=?").get(req.session.uid || 0);
   return u?.is_admin ? next() : res.status(403).json({ error: "Hub admin only" });
 };
+const repOf = (uid) =>
+  db.prepare(`SELECT COUNT(DISTINCT t.id) c FROM trades t JOIN trade_legs l ON l.trade_id=t.id
+    WHERE t.status='closed' AND (l.from_user=? OR l.to_user=?)`).get(uid, uid).c;
 const me = (req) => db.prepare("SELECT id,email,name,is_admin,want_mode FROM users WHERE id=?").get(req.session.uid);
 
 /* ----------------------------- auth ------------------------------ */
-app.post("/api/register", (req, res) => {
+app.post("/api/register", rateLimit, (req, res) => {
   const { email, password, name } = req.body || {};
   if (!email || !password || !name) return res.status(400).json({ error: "email, password, name required" });
   if (password.length < 8) return res.status(400).json({ error: "Password must be 8+ characters" });
@@ -46,7 +61,7 @@ app.post("/api/register", (req, res) => {
   }
 });
 
-app.post("/api/login", (req, res) => {
+app.post("/api/login", rateLimit, (req, res) => {
   const u = db.prepare("SELECT * FROM users WHERE email=?").get((req.body.email || "").toLowerCase().trim());
   if (!u || !bcrypt.compareSync(req.body.password || "", u.pass_hash)) return res.status(401).json({ error: "Invalid email or password" });
   req.session.uid = u.id;
@@ -151,6 +166,9 @@ app.get("/api/board", auth, (req, res) => {
 
 /* --------------------------- matching ----------------------------- */
 function findRoutes() {
+  /* cards already committed to a proposed/locked trade are off the table */
+  const busy = new Set(db.prepare(`SELECT l.from_user||':'||l.card_id k FROM trade_legs l
+    JOIN trades t ON t.id=l.trade_id WHERE t.status IN ('proposed','locked')`).all().map(r=>r.k));
   const users = db.prepare("SELECT id,name,want_mode FROM users").all();
   const binderRows = db.prepare("SELECT user_id,card_id,side FROM binder").all();
   const cards = Object.fromEntries(db.prepare("SELECT * FROM cards").all().map((c) => [c.id, c]));
@@ -167,12 +185,14 @@ function findRoutes() {
     edges[a.id] = [];
     traders.forEach((b) => {
       if (a.id === b.id) return;
-      a.have.forEach((cardId) => { if (wants(b, cardId)) edges[a.id].push({ to: b.id, card: cardId }); });
+      a.have.forEach((cardId) => { if (!busy.has(a.id + ":" + cardId) && wants(b, cardId)) edges[a.id].push({ to: b.id, card: cardId }); });
     });
   });
 
   const routes = [], seen = new Set(), ids = traders.map((t) => t.id);
+  const MAX_CYCLES = 400; // enumeration cap; selection picks the best subset
   const dfs = (start, cur, path, usedU, usedC) => {
+    if (routes.length >= MAX_CYCLES) return;
     for (const e of edges[cur] || []) {
       if (usedC.has(e.card)) continue;
       if (e.to === start && path.length >= 1) {
@@ -190,37 +210,101 @@ function findRoutes() {
   };
   ids.forEach((id) => dfs(id, id, [], new Set([id]), new Set()));
 
+  /* ---- multilateral clearing: score every cycle, then select the ----
+     ---- best NON-CONFLICTING set (no two routes claim the same     ----
+     ---- physical card from the same owner, or deliver the same     ----
+     ---- card twice to the same seeker)                             ---- */
   const nameOf = Object.fromEntries(traders.map((t) => [t.id, t.name]));
-  return routes.slice(0, 12).map((route) => {
+  const enrich = (route) => {
     const settle = {};
+    let totalValue = 0;
     route.forEach((s) => {
       const v = cards[s.card]?.price_cents ?? 0;
+      totalValue += v;
       settle[s.from] = (settle[s.from] || 0) - v;
       settle[s.to] = (settle[s.to] || 0) + v;
     });
-    return {
-      legs: route.map((s) => ({ ...s, fromName: nameOf[s.from], toName: nameOf[s.to], card: cards[s.card] })),
-      settlement: Object.entries(settle).map(([uid, cents]) => ({ userId: +uid, name: nameOf[uid], cents })),
-    };
-  });
+    const creditMoved = Object.values(settle).reduce((a, c) => a + Math.abs(c), 0) / 2;
+    /* score: more value traded is better; each extra hop costs $15 of
+       score (more parties = more shipping risk); heavy credit imbalance
+       costs half its size (lopsided trades are fragile) */
+    const score = totalValue - 1500 * (route.length - 2) - Math.round(creditMoved / 2);
+    return { route, totalValue, creditMoved, score, settle };
+  };
+
+  const scored = routes.map(enrich).sort((a, b) => b.score - a.score);
+  const used = new Set();
+  const selected = [];
+  for (const r of scored) {
+    const keys = r.route.flatMap((s) => [`give:${s.from}:${s.card}`, `get:${s.to}:${s.card}`]);
+    if (keys.some((k) => used.has(k))) continue;
+    keys.forEach((k) => used.add(k));
+    selected.push(r);
+    if (selected.length >= 12) break;
+  }
+
+  return selected.map(({ route, totalValue, creditMoved, score, settle }) => ({
+    legs: route.map((s) => ({ ...s, fromName: nameOf[s.from], toName: nameOf[s.to], card: cards[s.card] })),
+    settlement: Object.entries(settle).map(([uid, cents]) => ({ userId: +uid, name: nameOf[uid], cents })),
+    score, total_value_cents: totalValue, credit_moved_cents: creditMoved,
+  }));
 }
 
 app.get("/api/matches", auth, (req, res) => res.json({ routes: findRoutes() }));
 
 /* ----------------------------- trades ----------------------------- */
-app.post("/api/trades/lock", auth, (req, res) => {
+/* Routes are PROPOSED; every participant must approve before lock.   */
+app.post("/api/trades/propose", auth, (req, res) => {
   const { legs } = req.body || {};
   if (!Array.isArray(legs) || legs.length < 2) return res.status(400).json({ error: "legs required" });
   if (!legs.some((l) => l.from === req.session.uid || l.to === req.session.uid))
-    return res.status(403).json({ error: "You can only lock routes you are part of" });
-  const t = db.prepare("INSERT INTO trades (status) VALUES ('locked')").run();
+    return res.status(403).json({ error: "You can only propose routes you are part of" });
+  const t = db.prepare("INSERT INTO trades (status,proposed_by) VALUES ('proposed',?)").run(req.session.uid);
+  const tid = Number(t.lastInsertRowid);
   const ins = db.prepare("INSERT INTO trade_legs (trade_id,from_user,to_user,card_id,value_cents) VALUES (?,?,?,?,?)");
+  const participants = new Set();
   for (const l of legs) {
     const card = db.prepare("SELECT * FROM cards WHERE id=?").get(l.card?.id || l.card);
     if (!card) return res.status(400).json({ error: "Unknown card in route" });
-    ins.run(Number(t.lastInsertRowid), l.from, l.to, card.id, card.price_cents);
+    ins.run(tid, l.from, l.to, card.id, card.price_cents);
+    participants.add(l.from); participants.add(l.to);
   }
-  res.json({ tradeId: Number(t.lastInsertRowid), status: "locked", note: "All parties now ship to the hub." });
+  const ap = db.prepare("INSERT INTO trade_approvals (trade_id,user_id,approved) VALUES (?,?,?)");
+  for (const uid of participants) ap.run(tid, uid, uid === req.session.uid ? 1 : 0);
+  const pending = [...participants].filter((u) => u !== req.session.uid).length;
+  res.json({ tradeId: tid, status: "proposed", note: `Waiting on ${pending} approval${pending === 1 ? "" : "s"} — participants approve in My Trades.` });
+});
+
+app.post("/api/trades/:id/approve", auth, (req, res) => {
+  const t = db.prepare("SELECT * FROM trades WHERE id=? AND status='proposed'").get(req.params.id);
+  if (!t) return res.status(404).json({ error: "No pending proposal with that id" });
+  const r = db.prepare("UPDATE trade_approvals SET approved=1 WHERE trade_id=? AND user_id=?").run(t.id, req.session.uid);
+  if (!r.changes) return res.status(403).json({ error: "You are not part of this trade" });
+  const left = db.prepare("SELECT COUNT(*) c FROM trade_approvals WHERE trade_id=? AND approved=0").get(t.id).c;
+  if (left === 0) {
+    db.prepare("UPDATE trades SET status='locked' WHERE id=?").run(t.id);
+    return res.json({ ok: true, status: "locked", note: "Everyone approved — all parties now ship to the hub." });
+  }
+  res.json({ ok: true, status: "proposed", note: `${left} approval${left === 1 ? "" : "s"} still pending.` });
+});
+
+app.post("/api/trades/:id/reject", auth, (req, res) => {
+  const t = db.prepare("SELECT * FROM trades WHERE id=? AND status='proposed'").get(req.params.id);
+  if (!t) return res.status(404).json({ error: "No pending proposal with that id" });
+  if (!db.prepare("SELECT 1 FROM trade_approvals WHERE trade_id=? AND user_id=?").get(t.id, req.session.uid))
+    return res.status(403).json({ error: "You are not part of this trade" });
+  db.prepare("UPDATE trades SET status='void' WHERE id=?").run(t.id);
+  res.json({ ok: true, status: "void" });
+});
+
+/* member marks their own package as mailed */
+app.post("/api/legs/:id/shipped", auth, (req, res) => {
+  const leg = db.prepare(`SELECT l.* FROM trade_legs l JOIN trades t ON t.id=l.trade_id
+    WHERE l.id=? AND t.status='locked'`).get(req.params.id);
+  if (!leg) return res.status(404).json({ error: "No such leg on a locked trade" });
+  if (leg.from_user !== req.session.uid) return res.status(403).json({ error: "Only the shipper can mark this" });
+  db.prepare("UPDATE trade_legs SET shipped = 1 - shipped WHERE id=?").run(leg.id);
+  res.json({ ok: true });
 });
 
 const tradeView = (id) => {
@@ -229,15 +313,20 @@ const tradeView = (id) => {
   if (trade?.payee_id) trade.payee_name = db.prepare("SELECT name FROM users WHERE id=?").get(trade.payee_id)?.name;
   return {
     trade,
-    legs: db.prepare(`SELECT l.*, uf.name from_name, ut.name to_name, c.name card_name, c.rarity, c.set_name
+    approvals: db.prepare(`SELECT a.user_id, a.approved, u.name FROM trade_approvals a JOIN users u ON u.id=a.user_id WHERE a.trade_id=?`).all(id),
+    legs: db.prepare(`SELECT l.*, uf.name from_name, ut.name to_name, c.name card_name, c.rarity, c.set_name, c.image_url
       FROM trade_legs l JOIN users uf ON uf.id=l.from_user JOIN users ut ON ut.id=l.to_user JOIN cards c ON c.id=l.card_id
       WHERE l.trade_id=?`).all(id),
   };
 };
 
 app.get("/api/trades", auth, (req, res) => {
-  const ids = db.prepare("SELECT DISTINCT trade_id FROM trade_legs WHERE from_user=? OR to_user=?").all(req.session.uid, req.session.uid);
-  res.json({ trades: ids.map((r) => tradeView(r.trade_id)) });
+  const ids = db.prepare("SELECT DISTINCT trade_id FROM trade_legs WHERE from_user=? OR to_user=? ORDER BY trade_id DESC").all(req.session.uid, req.session.uid);
+  res.json({
+    me: req.session.uid,
+    hub_address: process.env.HUB_ADDRESS || "Hub mailing address not configured yet — the admin sets HUB_ADDRESS in environment variables.",
+    trades: ids.map((r) => tradeView(r.trade_id)),
+  });
 });
 
 /* ----------------------------- offers ----------------------------- */
@@ -246,6 +335,7 @@ const offerView = (o) => ({
   card: db.prepare("SELECT * FROM cards WHERE id=?").get(o.card_id),
   owner: db.prepare("SELECT name FROM users WHERE id=?").get(o.owner_id)?.name,
   offerer: db.prepare("SELECT name FROM users WHERE id=?").get(o.offerer_id)?.name,
+  offerer_rep: repOf(o.offerer_id), owner_rep: repOf(o.owner_id),
   offered_cards: db.prepare("SELECT c.* FROM offer_cards oc JOIN cards c ON c.id=oc.card_id WHERE oc.offer_id=?").all(o.id),
 });
 

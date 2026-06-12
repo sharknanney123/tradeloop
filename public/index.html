@@ -174,6 +174,14 @@
 
     <section id="tab-board" class="hidden"><div id="boardList"></div></section>
 
+    <section id="tab-trades" class="hidden">
+      <div class="card">
+        <h2 class="display">My trades</h2>
+        <p class="muted small">Every loop and deal you're part of. Proposals need everyone's approval before they lock; once locked, ship your card to the hub and mark it mailed.</p>
+        <div id="tradesList"></div>
+      </div>
+    </section>
+
     <section id="tab-offers" class="hidden">
       <div class="card">
         <h2 class="display">Offers on my cards</h2>
@@ -278,7 +286,7 @@ async function doAuth(){
 async function logout(){await api('/api/logout',{method:'POST'});location.reload()}
 
 /* ---------- boot ---------- */
-const TABS=[['routes','Routes'],['board','Board'],['offers','Offers'],['binder','My Binder'],['seeking','Seeking'],['wallet','Wallet']];
+const TABS=[['routes','Routes'],['board','Board'],['offers','Offers'],['trades','My Trades'],['binder','My Binder'],['seeking','Seeking'],['wallet','Wallet']];
 let activeTab='routes';
 async function boot(){
   try{const j=await api('/api/me');ME=j.user;$('balance').textContent=fmt(j.balance_cents);}
@@ -293,27 +301,60 @@ async function boot(){
 function showTab(id){activeTab=id;
   for(const [t] of [...TABS,['hub']])$('tab-'+t)?.classList.toggle('hidden',t!==id);
   document.querySelectorAll('nav button').forEach(b=>b.className=b.id==='tabbtn-'+id?'on':'off');
-  ({routes:loadRoutes,board:loadBoard,offers:loadOffers,binder:loadBinder,seeking:loadBinder,wallet:loadLedger,hub:loadHub})[id]?.();
+  ({routes:loadRoutes,board:loadBoard,offers:loadOffers,trades:loadTrades,binder:loadBinder,seeking:loadBinder,wallet:loadLedger,hub:loadHub})[id]?.();
 }
 
 /* ---------- routes ---------- */
 async function loadRoutes(){
   const {routes}=await api('/api/matches');
-  $('routesList').innerHTML=routes.length?routes.map((r,i)=>`
+  const banner=routes.length?`<div class="card deep" style="padding:10px 14px">
+    <b style="color:var(--gold);font-size:11px;letter-spacing:.1em">OPTIMIZED CLEARING</b>
+    <p class="muted small" style="margin-top:3px">The engine scored every possible loop and selected the best <b>non-conflicting</b> set — no two routes below claim the same card, so any or all of them can lock. Ranked by value traded, fewest hops, and least credit imbalance.</p>
+  </div>`:'';
+  $('routesList').innerHTML=routes.length?banner+routes.map((r,i)=>`
     <div class="card">
-      <div class="row"><b style="color:var(--gold);font-size:11px;letter-spacing:.1em">${r.legs.length===2?'DIRECT SWAP':r.legs.length+'-WAY LOOP'}</b>
-        <span class="muted small">all via hub</span></div>
+      <div class="row"><b style="color:var(--gold);font-size:11px;letter-spacing:.1em">#${i+1} · ${r.legs.length===2?'DIRECT SWAP':r.legs.length+'-WAY LOOP'}</b>
+        <span class="muted small">${fmt(r.total_value_cents)} traded · ${r.credit_moved_cents?fmt(r.credit_moved_cents)+' credit moves':'even'} · score ${(r.score/100).toFixed(0)}</span></div>
       ${r.legs.map(l=>`<div class="cardrow">${thumb(l.card)}<div class="info legrow" style="border:none;padding:0">
         <b>${esc(l.fromName)}</b> ships <em>${esc(l.card.name)}</em> (${fmt(l.card.price_cents)}) → <b>${esc(l.toName)}</b>
         ${l.card.changes_30d>=45?'<span class="badge fast">'+l.card.changes_30d+' moves/30d</span>':''}</div></div>`).join('')}
       <div class="settle">${r.settlement.filter(s=>s.cents!==0).map(s=>`<div class="${s.cents>0?'pays':'gets'}">${esc(s.name)} ${s.cents>0?'pays '+fmt(s.cents):'is credited '+fmt(-s.cents)}</div>`).join('')||'<span class="muted">even trade — no credit moves</span>'}</div>
-      <button class="waxb full" onclick='lockRoute(${JSON.stringify(JSON.stringify(r.legs.map(l=>({from:l.from,to:l.to,card:l.card.id}))))})'>Lock route — everyone ships to the hub</button>
+      <button class="waxb full" onclick='proposeRoute(${JSON.stringify(JSON.stringify(r.legs.map(l=>({from:l.from,to:l.to,card:l.card.id}))))})'>Propose route — everyone approves, then ships</button>
     </div>`).join(''):
     `<div class="card deep" style="text-align:center;border-style:dashed"><p class="muted">No closed loops yet. Add cards in <b>My Binder</b> and <b>Seeking</b> — one new listing can complete a chain for everyone.</p></div>`;
 }
-async function lockRoute(legsJson){
-  try{const j=await api('/api/trades/lock',{method:'POST',body:{legs:JSON.parse(legsJson)}});
-    toast('Route #'+j.tradeId+' locked. '+j.note);loadRoutes();}
+async function proposeRoute(legsJson){
+  try{const j=await api('/api/trades/propose',{method:'POST',body:{legs:JSON.parse(legsJson)}});
+    toast('Route #'+j.tradeId+' proposed. '+j.note);loadRoutes();}
+  catch(e){toast(e.message)}
+}
+
+/* ---------- my trades ---------- */
+async function loadTrades(){
+  const j=await api('/api/trades');
+  const me=j.me;
+  $('tradesList').innerHTML=j.trades.length?j.trades.map(({trade,legs,approvals})=>{
+    const myApproval=approvals.find(a=>a.user_id===me);
+    const statusChip=`<span class="badge ${trade.status==='closed'?'fast':trade.status==='void'?'slow':''}" style="${trade.status==='locked'?'background:var(--gold);color:var(--ink)':trade.status==='proposed'?'background:var(--wax);color:var(--cream)':''}">${trade.status.toUpperCase()}</span>`;
+    return `<div class="card deep" style="margin-top:10px">
+      <div class="row"><b>Trade #${trade.id}${trade.settlement==='agreed'?' · negotiated deal':''}</b>${statusChip}</div>
+      ${trade.status==='proposed'?`<div class="muted small" style="margin:4px 0">Approvals: ${approvals.map(a=>`<span class="${a.approved?'gets':'pays'}">${esc(a.name)} ${a.approved?'✓':'…'}</span>`).join(' · ')}</div>`:''}
+      ${legs.map(l=>`<div class="legrow"><b>${esc(l.from_name)}</b> → <em>${esc(l.card_name)}</em> (${fmt(l.value_cents)}) → <b>${esc(l.to_name)}</b>
+        ${trade.status==='locked'?`<br><span class="muted" style="font-size:10.5px">${l.shipped?'📦 mailed':'waiting to mail'} · ${l.received?'arrived at hub':'not at hub yet'} · ${l.checked?'verified ✓':''}</span>
+        ${l.from_user===me&&!l.received?`<button class="checkbtn ${l.shipped?'gold':'waxb'}" onclick="markShipped(${l.id})">${l.shipped?'✓ I mailed it':'I mailed my card'}</button>`:''}`:''}
+      </div>`).join('')}
+      ${trade.status==='proposed'&&myApproval&&!myApproval.approved?`<div style="margin-top:8px">
+        <button class="gold checkbtn" onclick="actTrade(${trade.id},'approve')">Approve this trade</button>
+        <button class="ghost checkbtn" onclick="actTrade(${trade.id},'reject')">Decline</button></div>`:''}
+      ${trade.status==='locked'?`<div class="settle" style="margin-top:8px"><b class="small" style="color:var(--gold)">SHIP YOUR CARD TO THE HUB:</b><br><span class="small">${esc(j.hub_address)}</span><br><span class="muted" style="font-size:10.5px">Write "Trade #${trade.id}" on the package.</span></div>`:''}
+    </div>`}).join(''):'<p class="muted small">No trades yet. Propose a route from the Routes tab, or accept an offer.</p>';
+}
+async function actTrade(id,action){
+  try{const j=await api('/api/trades/'+id+'/'+action,{method:'POST'});toast(j.note||'Done.');loadTrades();}
+  catch(e){toast(e.message)}
+}
+async function markShipped(legId){
+  try{await api('/api/legs/'+legId+'/shipped',{method:'POST'});loadTrades();}
   catch(e){toast(e.message)}
 }
 
@@ -362,7 +403,7 @@ async function sendOffer(cardId,ownerId){
 /* ---------- offers tab ---------- */
 const offerSummary=(o)=>`
   <div class="row" style="align-items:flex-start"><div class="info">
-    <div class="small"><b>${esc(o.offerer)}</b> offers for <em style="color:var(--gold)">${esc(o.card?.name)}</em>:</div>
+    <div class="small"><b>${esc(o.offerer)}</b> <span class="muted">(✦ ${o.offerer_rep} loops closed)</span> offers for <em style="color:var(--gold)">${esc(o.card?.name)}</em>:</div>
     <div class="small" style="margin-top:3px">${o.offered_cards.length?o.offered_cards.map(c=>`<span class="chip" style="cursor:default">${esc(c.name)} · ${fmt(c.price_cents)}</span>`).join(''):''}
       ${o.credit_cents>0?`<span class="chip" style="cursor:default;border-color:var(--gold);color:var(--gold)">+ ${fmt(o.credit_cents)} credit</span>`:''}</div>
     <div class="muted" style="font-size:10.5px;margin-top:3px">offer value ~${fmt(o.offered_cards.reduce((s,c)=>s+c.price_cents,0)+o.credit_cents)} vs card ${fmt(o.card?.price_cents??0)} · ${esc(o.created_at)}</div>
@@ -463,6 +504,7 @@ async function loadHub(){
       ${trade.settlement==='agreed'&&trade.agreed_credit_cents>0?`<div class="settle"><span class="pays">${esc(trade.payer_name)} pays the agreed ${fmt(trade.agreed_credit_cents)}</span> → <span class="gets">${esc(trade.payee_name)}</span> at release</div>`:''}
       ${legs.map(l=>`<div class="legrow"><b>${esc(l.from_name)}</b> → <em>${esc(l.card_name)}</em> (${fmt(l.value_cents)}) → <b>${esc(l.to_name)}</b><br>
         ${trade.status==='locked'?`
+        <span class="badge ${l.shipped?'fast':'slow'}">${l.shipped?'member mailed it':'not mailed yet'}</span>
         <button class="checkbtn ${l.received?'gold':'ghost'}" onclick="toggleLeg(${l.id},'received')">${l.received?'✓ ':''}received</button>
         <button class="checkbtn ${l.checked?'gold':'ghost'}" onclick="toggleLeg(${l.id},'checked')">${l.checked?'✓ ':''}condition ok</button>`:''}
       </div>`).join('')}

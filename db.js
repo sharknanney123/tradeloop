@@ -79,6 +79,15 @@ try { db.exec("ALTER TABLE trades ADD COLUMN settlement TEXT DEFAULT 'market'");
 try { db.exec("ALTER TABLE trades ADD COLUMN agreed_credit_cents INTEGER DEFAULT 0"); } catch {}
 try { db.exec("ALTER TABLE trades ADD COLUMN payer_id INTEGER"); } catch {}
 try { db.exec("ALTER TABLE trades ADD COLUMN payee_id INTEGER"); } catch {}
+/* proposal & shipping lifecycle migrations */
+try { db.exec("ALTER TABLE trades ADD COLUMN proposed_by INTEGER"); } catch {}
+try { db.exec("ALTER TABLE trade_legs ADD COLUMN shipped INTEGER DEFAULT 0"); } catch {}
+db.exec(`CREATE TABLE IF NOT EXISTS trade_approvals (
+  trade_id INTEGER NOT NULL REFERENCES trades(id),
+  user_id INTEGER NOT NULL REFERENCES users(id),
+  approved INTEGER DEFAULT 0,
+  UNIQUE(trade_id, user_id)
+);`);
 db.exec(`
 CREATE TABLE IF NOT EXISTS offers (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
